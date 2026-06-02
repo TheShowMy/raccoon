@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 raccoon：Rust 多 Agent 编排器，通过 JSONL RPC 管理 Pi Agent 子进程。
 
+## 启动项目
+
+npm run dev
+
 ## 文档
 
 - 架构核心：[docs/ARCHITECTURE_CORE.md](docs/ARCHITECTURE_CORE.md)
