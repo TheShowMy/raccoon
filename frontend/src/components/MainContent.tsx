@@ -1,18 +1,12 @@
 import { useAppStore } from "../stores/useAppStore";
-import { SettingsPanel } from "./SettingsPanel";
 import { ProjectDetail } from "./ProjectDetail";
 import { EmptyState } from "./EmptyState";
 import { MousePointerClick } from "lucide-react";
 import { deleteProject } from "../api/client";
 
 export function MainContent() {
-  const {
-    showSettings,
-    projects,
-    currentProjectId,
-    removeProject,
-    openAddModal,
-  } = useAppStore();
+  const { projects, currentProjectId, removeProject, openAddModal } =
+    useAppStore();
 
   const currentProject = projects.find((p) => p.id === currentProjectId);
 
@@ -24,10 +18,6 @@ export function MainContent() {
       alert("删除失败");
     }
   };
-
-  if (showSettings) {
-    return <SettingsPanel />;
-  }
 
   if (!currentProject) {
     return (

@@ -2,6 +2,7 @@ import { useCallback, useEffect } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { MainContent } from "./components/MainContent";
 import { AddProjectModal } from "./components/AddProjectModal";
+import { SettingsPanel } from "./components/SettingsPanel";
 import { PiAgentInstallBlocker } from "./components/PiAgentInstallBlocker";
 import { useAppStore } from "./stores/useAppStore";
 import { fetchPiStatus, fetchProjects } from "./api/client";
@@ -56,6 +57,7 @@ function App() {
       <Sidebar />
       <MainContent />
       <AddProjectModal />
+      <SettingsPanel />
     </div>
   );
 }
