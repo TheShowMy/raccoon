@@ -20,7 +20,7 @@ npm run dev
 ## 做什么
 
 - 用 Rust 写编排器，不碰 Pi Agent 本身
-- 通过 `pi --mode rpc` 启动子进程，stdin/stdout JSONL 通信
+- **所有与 Pi Agent 的交互必须通过持久 RPC 子进程进行**：`pi --mode rpc`，stdin/stdout JSONL 通信
 - 每个 Task 用独立 Git worktree 隔离代码
 - 默认用低价模型，失败时按状态机升级（重试 → Coordinator 指导 → set_model → 新 Specialist）
 - 确定性验收：测试、lint、build、schema 验证通过才算完成
@@ -35,7 +35,10 @@ npm run dev
 - 不要把浏览器能力默认注入所有 coding worker
 - 不要把高价模型设为默认 worker
 - 不要把项目私有数据硬编码进共享 skill
+- **禁止直接执行 `pi --list-models` 等一次性命令获取数据** — 必须通过 RPC 子进程调用对应命令（如 `get_available_models`）
 
 ## 绝对规则
 
 - **所有新增代码必须通过 pre-commit 规则检查。** 提交代码时禁止绕过或忽略 pre-commit 钩子（如 `git commit --no-verify`）。如果 pre-commit 失败，必须先修复问题再提交。
+- **测试截图必须保存到 `/tmp` 目录，不得提交到仓库。** 每次开始新的 UI 测试任务前，先清空 `/tmp` 中的旧截图（`rm -f /tmp/raccoon-test-*.png`），避免文件无限膨胀。
+- **web测试使用chrome-devtools mcp。**- ** web测试请使用chrome-devtools mcp。

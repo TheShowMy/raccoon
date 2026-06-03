@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use axum::{
     extract::{Extension, Path},
     response::Json,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,7 @@ use tower_http::services::ServeDir;
 use tracing::{info, warn};
 
 mod db;
+mod pi_rpc;
 
 const PORT: u16 = 3003;
 
@@ -89,7 +90,18 @@ async fn main() -> Result<()> {
         }
     };
 
-    let app = create_router(pool);
+    let pi_client = match pi_rpc::PiRpcClient::new().await {
+        Ok(c) => {
+            info!("Pi RPC 客户端初始化成功");
+            std::sync::Arc::new(c)
+        }
+        Err(e) => {
+            warn!("Pi RPC 客户端初始化失败: {}", e);
+            return Err(e);
+        }
+    };
+
+    let app = create_router(pool, pi_client);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], PORT));
     info!("🦝 raccoon 服务启动于 http://{}", addr);
@@ -100,7 +112,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn create_router(pool: Pool<Sqlite>) -> Router {
+fn create_router(pool: Pool<Sqlite>, pi_client: std::sync::Arc<pi_rpc::PiRpcClient>) -> Router {
     let api_routes = Router::new()
         .route("/api/health", get(health_handler))
         .route("/api/pi-status", get(pi_status_handler))
@@ -116,7 +128,17 @@ fn create_router(pool: Pool<Sqlite>) -> Router {
             "/api/pi-config/auth/:provider",
             delete(delete_pi_auth_handler),
         )
-        .layer(Extension(pool));
+        .route("/api/models", get(list_models_handler))
+        .route(
+            "/api/model-identities",
+            get(list_model_identities_handler).post(create_model_identity_handler),
+        )
+        .route(
+            "/api/model-identities/:id",
+            put(update_model_identity_handler).delete(delete_model_identity_handler),
+        )
+        .layer(Extension(pool))
+        .layer(Extension(pi_client));
 
     let frontend_router = if let Some(dir) = find_frontend_dir() {
         info!("前端静态文件目录: {}", dir.display());
@@ -465,6 +487,133 @@ async fn delete_pi_auth_handler(Path(provider): Path<String>) -> Json<ApiRespons
         Ok(()) => Json(ApiResponse::ok(true)),
         Err(e) => {
             warn!("删除 Pi auth 失败: {}", e);
+            Json(ApiResponse::err(format!("删除失败: {}", e)))
+        }
+    }
+}
+
+// ===== Pi 可用模型列表 =====
+
+async fn list_models_handler(
+    Extension(pi_client): Extension<std::sync::Arc<pi_rpc::PiRpcClient>>,
+) -> Json<ApiResponse<Vec<pi_rpc::PiModel>>> {
+    match pi_client.get_available_models().await {
+        Ok(models) => Json(ApiResponse::ok(models)),
+        Err(e) => {
+            warn!("获取模型列表失败: {}", e);
+            Json(ApiResponse::err(format!("获取模型列表失败: {}", e)))
+        }
+    }
+}
+
+// ===== 模型身份 CRUD =====
+
+async fn list_model_identities_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+) -> Json<ApiResponse<Vec<db::ModelIdentity>>> {
+    match db::get_model_identities(&pool).await {
+        Ok(identities) => Json(ApiResponse::ok(identities)),
+        Err(e) => {
+            warn!("获取模型身份列表失败: {}", e);
+            Json(ApiResponse::err(e.to_string()))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateModelIdentityRequest {
+    name: String,
+    provider: String,
+    model: String,
+    #[serde(rename = "thinkingLevel")]
+    thinking_level: String,
+    enabled: bool,
+}
+
+async fn create_model_identity_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+    axum::extract::Json(req): axum::extract::Json<CreateModelIdentityRequest>,
+) -> Json<ApiResponse<db::ModelIdentity>> {
+    if req.name.trim().is_empty() {
+        return Json(ApiResponse::err("身份名称不能为空"));
+    }
+    if req.provider.trim().is_empty() {
+        return Json(ApiResponse::err("Provider 不能为空"));
+    }
+    if req.model.trim().is_empty() {
+        return Json(ApiResponse::err("Model 不能为空"));
+    }
+
+    match db::create_model_identity(
+        &pool,
+        &req.name,
+        &req.provider,
+        &req.model,
+        &req.thinking_level,
+        req.enabled,
+    )
+    .await
+    {
+        Ok(identity) => Json(ApiResponse::ok(identity)),
+        Err(e) => {
+            warn!("创建模型身份失败: {}", e);
+            Json(ApiResponse::err(format!("创建失败: {}", e)))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateModelIdentityRequest {
+    name: String,
+    provider: String,
+    model: String,
+    #[serde(rename = "thinkingLevel")]
+    thinking_level: String,
+    enabled: bool,
+}
+
+async fn update_model_identity_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+    Path(id): Path<i64>,
+    axum::extract::Json(req): axum::extract::Json<UpdateModelIdentityRequest>,
+) -> Json<ApiResponse<bool>> {
+    if req.name.trim().is_empty() {
+        return Json(ApiResponse::err("身份名称不能为空"));
+    }
+    if req.provider.trim().is_empty() {
+        return Json(ApiResponse::err("Provider 不能为空"));
+    }
+    if req.model.trim().is_empty() {
+        return Json(ApiResponse::err("Model 不能为空"));
+    }
+
+    match db::update_model_identity(
+        &pool,
+        id,
+        &req.name,
+        &req.provider,
+        &req.model,
+        &req.thinking_level,
+        req.enabled,
+    )
+    .await
+    {
+        Ok(updated) => Json(ApiResponse::ok(updated)),
+        Err(e) => {
+            warn!("更新模型身份失败: {}", e);
+            Json(ApiResponse::err(format!("更新失败: {}", e)))
+        }
+    }
+}
+
+async fn delete_model_identity_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+    Path(id): Path<i64>,
+) -> Json<ApiResponse<bool>> {
+    match db::delete_model_identity(&pool, id).await {
+        Ok(deleted) => Json(ApiResponse::ok(deleted)),
+        Err(e) => {
+            warn!("删除模型身份失败: {}", e);
             Json(ApiResponse::err(format!("删除失败: {}", e)))
         }
     }

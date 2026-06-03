@@ -10,6 +10,18 @@ pub struct Project {
     pub created_at: String,
 }
 
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ModelIdentity {
+    pub id: i64,
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    pub thinking_level: String,
+    pub enabled: bool,
+    pub sort_order: i64,
+    pub created_at: String,
+}
+
 pub async fn init_db() -> Result<Pool<Sqlite>> {
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:raccoon.db".to_string());
 
@@ -41,8 +53,26 @@ pub async fn init_db() -> Result<Pool<Sqlite>> {
     .execute(&pool)
     .await?;
 
+    // 创建 model_identities 表
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS model_identities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            thinking_level TEXT NOT NULL DEFAULT 'medium',
+            enabled BOOLEAN NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
     Ok(pool)
 }
+
+// ===== Project CRUD =====
 
 pub async fn get_projects(pool: &Pool<Sqlite>) -> Result<Vec<Project>> {
     let projects = sqlx::query_as::<_, Project>(
@@ -74,6 +104,95 @@ pub async fn create_project(pool: &Pool<Sqlite>, name: &str, git_url: &str) -> R
 
 pub async fn delete_project(pool: &Pool<Sqlite>, id: i64) -> Result<bool> {
     let result = sqlx::query("DELETE FROM projects WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+// ===== Model Identity CRUD =====
+
+pub async fn get_model_identities(pool: &Pool<Sqlite>) -> Result<Vec<ModelIdentity>> {
+    let identities = sqlx::query_as::<_, ModelIdentity>(
+        "SELECT id, name, provider, model, thinking_level, enabled, sort_order, created_at
+         FROM model_identities
+         ORDER BY sort_order ASC, created_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(identities)
+}
+
+pub async fn create_model_identity(
+    pool: &Pool<Sqlite>,
+    name: &str,
+    provider: &str,
+    model: &str,
+    thinking_level: &str,
+    enabled: bool,
+) -> Result<ModelIdentity> {
+    // 获取当前最大 sort_order
+    let max_order: Option<i64> = sqlx::query_scalar("SELECT MAX(sort_order) FROM model_identities")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(None);
+    let sort_order = max_order.unwrap_or(0) + 1;
+
+    let id = sqlx::query(
+        "INSERT INTO model_identities (name, provider, model, thinking_level, enabled, sort_order)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(name)
+    .bind(provider)
+    .bind(model)
+    .bind(thinking_level)
+    .bind(enabled)
+    .bind(sort_order)
+    .execute(pool)
+    .await?
+    .last_insert_rowid();
+
+    let identity = sqlx::query_as::<_, ModelIdentity>(
+        "SELECT id, name, provider, model, thinking_level, enabled, sort_order, created_at
+         FROM model_identities WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(identity)
+}
+
+pub async fn update_model_identity(
+    pool: &Pool<Sqlite>,
+    id: i64,
+    name: &str,
+    provider: &str,
+    model: &str,
+    thinking_level: &str,
+    enabled: bool,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE model_identities
+         SET name = $1, provider = $2, model = $3, thinking_level = $4, enabled = $5
+         WHERE id = $6",
+    )
+    .bind(name)
+    .bind(provider)
+    .bind(model)
+    .bind(thinking_level)
+    .bind(enabled)
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn delete_model_identity(pool: &Pool<Sqlite>, id: i64) -> Result<bool> {
+    let result = sqlx::query("DELETE FROM model_identities WHERE id = $1")
         .bind(id)
         .execute(pool)
         .await?;
