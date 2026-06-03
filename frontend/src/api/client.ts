@@ -49,3 +49,54 @@ export async function deleteProject(id: number): Promise<boolean> {
   });
   return handleResponse<boolean>(res);
 }
+
+// ===== Pi Config API =====
+
+export interface PiSettings {
+  defaultProvider?: string;
+  defaultModel?: string;
+  defaultThinkingLevel?: string;
+}
+
+export interface PiAuthEntryPublic {
+  type: string;
+}
+
+export interface PiConfigResponse {
+  settings: PiSettings;
+  auth: Record<string, PiAuthEntryPublic>;
+}
+
+export async function fetchPiConfig(): Promise<PiConfigResponse> {
+  const res = await fetch("/api/pi-config");
+  return handleResponse<PiConfigResponse>(res);
+}
+
+export async function updatePiSettings(settings: PiSettings): Promise<boolean> {
+  const res = await fetch("/api/pi-config/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  });
+  return handleResponse<boolean>(res);
+}
+
+export async function updatePiAuth(
+  provider: string,
+  authType: string,
+  key: string,
+): Promise<boolean> {
+  const res = await fetch("/api/pi-config/auth", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, type: authType, key }),
+  });
+  return handleResponse<boolean>(res);
+}
+
+export async function deletePiAuth(provider: string): Promise<boolean> {
+  const res = await fetch(`/api/pi-config/auth/${provider}`, {
+    method: "DELETE",
+  });
+  return handleResponse<boolean>(res);
+}

@@ -1,13 +1,14 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     extract::{Extension, Path},
     response::Json,
-    routing::{delete, get},
+    routing::{delete, get, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use sqlx::{Pool, Sqlite};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tokio::process::Command;
@@ -108,6 +109,13 @@ fn create_router(pool: Pool<Sqlite>) -> Router {
             get(list_projects_handler).post(create_project_handler),
         )
         .route("/api/projects/:id", delete(delete_project_handler))
+        .route("/api/pi-config", get(pi_config_handler))
+        .route("/api/pi-config/settings", post(update_pi_settings_handler))
+        .route("/api/pi-config/auth", post(update_pi_auth_handler))
+        .route(
+            "/api/pi-config/auth/:provider",
+            delete(delete_pi_auth_handler),
+        )
         .layer(Extension(pool));
 
     let frontend_router = if let Some(dir) = find_frontend_dir() {
@@ -210,6 +218,253 @@ async fn delete_project_handler(
         Err(e) => {
             warn!("删除项目失败: {}", e);
             Json(ApiResponse::err(e.to_string()))
+        }
+    }
+}
+
+// ===== Pi Config API =====
+
+/// 获取 Pi Agent 配置目录
+fn pi_config_dir() -> PathBuf {
+    std::env::var("PI_CODING_AGENT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".pi/agent")
+        })
+}
+
+fn pi_settings_path() -> PathBuf {
+    pi_config_dir().join("settings.json")
+}
+
+fn pi_auth_path() -> PathBuf {
+    pi_config_dir().join("auth.json")
+}
+
+/// Pi settings.json 结构
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct PiSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_changelog_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_thinking_level: Option<String>,
+}
+
+/// Pi auth.json 中的单个条目（脱敏版，不返回 key）
+#[derive(Debug, Serialize)]
+struct PiAuthEntryPublic {
+    #[serde(rename = "type")]
+    auth_type: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PiConfigResponse {
+    settings: PiSettings,
+    auth: HashMap<String, PiAuthEntryPublic>,
+}
+
+/// 读取 Pi settings.json
+fn read_pi_settings() -> Result<PiSettings, anyhow::Error> {
+    let path = pi_settings_path();
+    if !path.exists() {
+        return Ok(PiSettings::default());
+    }
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("读取 Pi settings 失败: {}", path.display()))?;
+    let value: Value =
+        serde_json::from_str(&content).with_context(|| "解析 Pi settings JSON 失败")?;
+
+    // 手动映射字段（保留 snake_case 兼容性）
+    Ok(PiSettings {
+        last_changelog_version: value
+            .get("lastChangelogVersion")
+            .and_then(|v: &Value| v.as_str().map(String::from)),
+        default_provider: value
+            .get("defaultProvider")
+            .and_then(|v: &Value| v.as_str().map(String::from)),
+        default_model: value
+            .get("defaultModel")
+            .and_then(|v: &Value| v.as_str().map(String::from)),
+        default_thinking_level: value
+            .get("defaultThinkingLevel")
+            .and_then(|v: &Value| v.as_str().map(String::from)),
+    })
+}
+
+/// 读取 Pi auth.json（脱敏）
+fn read_pi_auth_public() -> Result<HashMap<String, PiAuthEntryPublic>, anyhow::Error> {
+    let path = pi_auth_path();
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("读取 Pi auth 失败: {}", path.display()))?;
+    let raw: HashMap<String, Value> =
+        serde_json::from_str(&content).with_context(|| "解析 Pi auth JSON 失败")?;
+
+    let mut auth = HashMap::new();
+    for (provider, entry) in raw {
+        let auth_type = entry
+            .get("type")
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "api_key".to_string());
+        auth.insert(provider, PiAuthEntryPublic { auth_type });
+    }
+    Ok(auth)
+}
+
+/// 写入 Pi settings.json（保留其他字段）
+fn write_pi_settings(settings: &PiSettings) -> Result<(), anyhow::Error> {
+    let path = pi_settings_path();
+    let mut value = if path.exists() {
+        let content = std::fs::read_to_string(&path)?;
+        serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
+    } else {
+        json!({})
+    };
+
+    if let Some(ref v) = settings.last_changelog_version {
+        value["lastChangelogVersion"] = json!(v);
+    }
+    if let Some(ref v) = settings.default_provider {
+        value["defaultProvider"] = json!(v);
+    }
+    if let Some(ref v) = settings.default_model {
+        value["defaultModel"] = json!(v);
+    }
+    if let Some(ref v) = settings.default_thinking_level {
+        value["defaultThinkingLevel"] = json!(v);
+    }
+
+    let content =
+        serde_json::to_string_pretty(&value).with_context(|| "序列化 Pi settings 失败")?;
+    std::fs::write(&path, content)
+        .with_context(|| format!("写入 Pi settings 失败: {}", path.display()))?;
+    Ok(())
+}
+
+/// 写入 Pi auth.json（添加/更新 provider）
+fn write_pi_auth(provider: &str, key: &str) -> Result<(), anyhow::Error> {
+    let path = pi_auth_path();
+    let mut value = if path.exists() {
+        let content = std::fs::read_to_string(&path)?;
+        serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
+    } else {
+        json!({})
+    };
+
+    value[provider] = json!({
+        "type": "api_key",
+        "key": key
+    });
+
+    let content = serde_json::to_string_pretty(&value).with_context(|| "序列化 Pi auth 失败")?;
+    std::fs::create_dir_all(path.parent().unwrap_or(PathBuf::from(".").as_path()))?;
+    std::fs::write(&path, content)
+        .with_context(|| format!("写入 Pi auth 失败: {}", path.display()))?;
+    Ok(())
+}
+
+/// 删除 Pi auth.json 中的 provider
+fn delete_pi_auth(provider: &str) -> Result<(), anyhow::Error> {
+    let path = pi_auth_path();
+    if !path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let mut value: Value = serde_json::from_str(&content)?;
+
+    if let Value::Object(ref mut map) = value {
+        map.remove(provider);
+    }
+
+    let content = serde_json::to_string_pretty(&value)?;
+    std::fs::write(&path, content)
+        .with_context(|| format!("写入 Pi auth 失败: {}", path.display()))?;
+    Ok(())
+}
+
+async fn pi_config_handler() -> Json<ApiResponse<PiConfigResponse>> {
+    match (read_pi_settings(), read_pi_auth_public()) {
+        (Ok(settings), Ok(auth)) => Json(ApiResponse::ok(PiConfigResponse { settings, auth })),
+        (Err(e), _) | (_, Err(e)) => {
+            warn!("读取 Pi 配置失败: {}", e);
+            Json(ApiResponse::err(format!("读取配置失败: {}", e)))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdatePiSettingsRequest {
+    #[serde(rename = "defaultProvider")]
+    default_provider: Option<String>,
+    #[serde(rename = "defaultModel")]
+    default_model: Option<String>,
+    #[serde(rename = "defaultThinkingLevel")]
+    default_thinking_level: Option<String>,
+}
+
+async fn update_pi_settings_handler(
+    axum::extract::Json(req): axum::extract::Json<UpdatePiSettingsRequest>,
+) -> Json<ApiResponse<bool>> {
+    let settings = PiSettings {
+        last_changelog_version: None,
+        default_provider: req.default_provider,
+        default_model: req.default_model,
+        default_thinking_level: req.default_thinking_level,
+    };
+
+    match write_pi_settings(&settings) {
+        Ok(()) => Json(ApiResponse::ok(true)),
+        Err(e) => {
+            warn!("更新 Pi settings 失败: {}", e);
+            Json(ApiResponse::err(format!("保存失败: {}", e)))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdatePiAuthRequest {
+    provider: String,
+    #[serde(rename = "type")]
+    auth_type: String,
+    key: String,
+}
+
+async fn update_pi_auth_handler(
+    axum::extract::Json(req): axum::extract::Json<UpdatePiAuthRequest>,
+) -> Json<ApiResponse<bool>> {
+    if req.provider.trim().is_empty() {
+        return Json(ApiResponse::err("Provider 不能为空"));
+    }
+    if req.key.trim().is_empty() {
+        return Json(ApiResponse::err("API Key 不能为空"));
+    }
+    if req.auth_type != "api_key" {
+        return Json(ApiResponse::err("目前仅支持 api_key 认证类型"));
+    }
+
+    match write_pi_auth(&req.provider, &req.key) {
+        Ok(()) => Json(ApiResponse::ok(true)),
+        Err(e) => {
+            warn!("更新 Pi auth 失败: {}", e);
+            Json(ApiResponse::err(format!("保存失败: {}", e)))
+        }
+    }
+}
+
+async fn delete_pi_auth_handler(Path(provider): Path<String>) -> Json<ApiResponse<bool>> {
+    match delete_pi_auth(&provider) {
+        Ok(()) => Json(ApiResponse::ok(true)),
+        Err(e) => {
+            warn!("删除 Pi auth 失败: {}", e);
+            Json(ApiResponse::err(format!("删除失败: {}", e)))
         }
     }
 }

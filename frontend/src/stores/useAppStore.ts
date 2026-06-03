@@ -1,5 +1,45 @@
 import { create } from "zustand";
 
+const STORAGE_KEY = "raccoon:currentProjectId";
+
+function loadStoredProjectId(): number | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw === null) return null;
+    const id = Number(raw);
+    return Number.isNaN(id) ? null : id;
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredProjectId(id: number | null) {
+  try {
+    if (id === null) {
+      localStorage.removeItem(STORAGE_KEY);
+    } else {
+      localStorage.setItem(STORAGE_KEY, String(id));
+    }
+  } catch {
+    // ignore localStorage errors
+  }
+}
+
+function resolveCurrentProjectId(
+  projects: Project[],
+  preferredId: number | null,
+): number | null {
+  if (projects.length === 0) return null;
+
+  // If preferred ID exists in the list, use it
+  if (preferredId !== null && projects.some((p) => p.id === preferredId)) {
+    return preferredId;
+  }
+
+  // Otherwise select the first project
+  return projects[0].id;
+}
+
 export interface Project {
   id: number;
   name: string;
@@ -33,15 +73,47 @@ export const useAppStore = create<AppState>((set) => ({
   showSettings: false,
 
   setPiInstalled: (v) => set({ piInstalled: v }),
-  setProjects: (p) => set({ projects: p }),
-  addProject: (p) => set((state) => ({ projects: [p, ...state.projects] })),
+
+  setProjects: (projects) => {
+    const preferredId = loadStoredProjectId();
+    const currentProjectId = resolveCurrentProjectId(projects, preferredId);
+    if (currentProjectId !== null) {
+      saveStoredProjectId(currentProjectId);
+    }
+    set({ projects, currentProjectId });
+  },
+
+  addProject: (p) =>
+    set((state) => {
+      const projects = [p, ...state.projects];
+      // If this is the first project, auto-select it
+      const currentProjectId =
+        state.currentProjectId === null ? p.id : state.currentProjectId;
+      if (currentProjectId !== null) {
+        saveStoredProjectId(currentProjectId);
+      }
+      return { projects, currentProjectId };
+    }),
+
   removeProject: (id) =>
-    set((state) => ({
-      projects: state.projects.filter((p) => p.id !== id),
-      currentProjectId:
-        state.currentProjectId === id ? null : state.currentProjectId,
-    })),
-  setCurrentProject: (id) => set({ currentProjectId: id }),
+    set((state) => {
+      const projects = state.projects.filter((p) => p.id !== id);
+      let currentProjectId = state.currentProjectId;
+
+      if (currentProjectId === id) {
+        // Select the first remaining project, or null if empty
+        currentProjectId = projects.length > 0 ? projects[0].id : null;
+        saveStoredProjectId(currentProjectId);
+      }
+
+      return { projects, currentProjectId };
+    }),
+
+  setCurrentProject: (id) => {
+    saveStoredProjectId(id);
+    set({ currentProjectId: id });
+  },
+
   openAddModal: () => set({ showAddModal: true }),
   closeAddModal: () => set({ showAddModal: false }),
   openSettings: () => set({ showSettings: true }),
