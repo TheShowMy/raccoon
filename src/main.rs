@@ -137,6 +137,10 @@ fn create_router(pool: Pool<Sqlite>, pi_client: std::sync::Arc<pi_rpc::PiRpcClie
             "/api/model-identities/:id",
             put(update_model_identity_handler).delete(delete_model_identity_handler),
         )
+        .route(
+            "/api/model-settings",
+            get(list_model_settings_handler).put(update_model_setting_handler),
+        )
         .layer(Extension(pool))
         .layer(Extension(pi_client));
 
@@ -617,6 +621,44 @@ async fn delete_model_identity_handler(
         Err(e) => {
             warn!("删除模型身份失败: {}", e);
             Json(ApiResponse::err(format!("删除失败: {}", e)))
+        }
+    }
+}
+
+// ===== Model Settings API =====
+
+async fn list_model_settings_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+) -> Json<ApiResponse<Vec<db::ModelSetting>>> {
+    match db::get_model_settings(&pool).await {
+        Ok(settings) => Json(ApiResponse::ok(settings)),
+        Err(e) => {
+            warn!("获取模型设置失败: {}", e);
+            Json(ApiResponse::err(format!("获取失败: {}", e)))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateModelSettingRequest {
+    provider: String,
+    model: String,
+    enabled: bool,
+}
+
+async fn update_model_setting_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+    axum::extract::Json(req): axum::extract::Json<UpdateModelSettingRequest>,
+) -> Json<ApiResponse<db::ModelSetting>> {
+    if req.provider.trim().is_empty() || req.model.trim().is_empty() {
+        return Json(ApiResponse::err("Provider 和 Model 不能为空"));
+    }
+
+    match db::upsert_model_setting(&pool, &req.provider, &req.model, req.enabled).await {
+        Ok(setting) => Json(ApiResponse::ok(setting)),
+        Err(e) => {
+            warn!("更新模型设置失败: {}", e);
+            Json(ApiResponse::err(format!("保存失败: {}", e)))
         }
     }
 }

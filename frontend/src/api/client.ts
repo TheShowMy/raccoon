@@ -122,3 +122,27 @@ export async function deleteModelIdentity(id: number): Promise<boolean> {
   });
   return handleResponse<boolean>(res);
 }
+
+// ===== Model Settings API =====
+
+export interface ModelSetting {
+  provider: string;
+  model: string;
+  enabled: boolean;
+}
+
+export async function fetchModelSettings(): Promise<ModelSetting[]> {
+  const res = await fetch("/api/model-settings");
+  return handleResponse<ModelSetting[]>(res);
+}
+
+export async function updateModelSetting(
+  setting: ModelSetting,
+): Promise<ModelSetting> {
+  const res = await fetch("/api/model-settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(setting),
+  });
+  return handleResponse<ModelSetting>(res);
+}

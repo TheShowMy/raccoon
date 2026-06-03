@@ -22,6 +22,15 @@ pub struct ModelIdentity {
     pub created_at: String,
 }
 
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ModelSetting {
+    pub provider: String,
+    pub model: String,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 pub async fn init_db() -> Result<Pool<Sqlite>> {
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:raccoon.db".to_string());
 
@@ -64,6 +73,20 @@ pub async fn init_db() -> Result<Pool<Sqlite>> {
             enabled BOOLEAN NOT NULL DEFAULT 1,
             sort_order INTEGER NOT NULL DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    // 创建 model_settings 表（模型级别配置）
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS model_settings (
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            enabled BOOLEAN NOT NULL DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (provider, model)
         )",
     )
     .execute(&pool)
@@ -197,4 +220,49 @@ pub async fn delete_model_identity(pool: &Pool<Sqlite>, id: i64) -> Result<bool>
         .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+// ===== Model Settings =====
+
+pub async fn get_model_settings(pool: &Pool<Sqlite>) -> Result<Vec<ModelSetting>> {
+    let settings = sqlx::query_as::<_, ModelSetting>(
+        "SELECT provider, model, enabled, created_at, updated_at
+         FROM model_settings
+         ORDER BY updated_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(settings)
+}
+
+pub async fn upsert_model_setting(
+    pool: &Pool<Sqlite>,
+    provider: &str,
+    model: &str,
+    enabled: bool,
+) -> Result<ModelSetting> {
+    sqlx::query(
+        "INSERT INTO model_settings (provider, model, enabled, updated_at)
+         VALUES ($1, $2, $3, datetime('now'))
+         ON CONFLICT(provider, model) DO UPDATE SET
+             enabled = excluded.enabled,
+             updated_at = datetime('now')",
+    )
+    .bind(provider)
+    .bind(model)
+    .bind(enabled)
+    .execute(pool)
+    .await?;
+
+    let setting = sqlx::query_as::<_, ModelSetting>(
+        "SELECT provider, model, enabled, created_at, updated_at
+         FROM model_settings WHERE provider = $1 AND model = $2",
+    )
+    .bind(provider)
+    .bind(model)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(setting)
 }

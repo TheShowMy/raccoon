@@ -4,13 +4,14 @@ import { useAppStore } from "../stores/useAppStore";
 import {
   fetchPiModels,
   fetchModelIdentities,
+  fetchModelSettings,
   createModelIdentity,
   updateModelIdentity,
-  deleteModelIdentity,
+  updateModelSetting,
 } from "../api/client";
-import type { PiModel, ModelIdentity } from "../api/client";
+import type { PiModel, ModelIdentity, ModelSetting } from "../api/client";
 import { ModelsTab } from "./ModelsTab";
-import { IdentityModal } from "./IdentityModal";
+import { ModelSettingsModal } from "./ModelSettingsModal";
 import { AlertCircle } from "lucide-react";
 
 type Tab = "models" | "auth";
@@ -24,29 +25,27 @@ export function SettingsPanel() {
   // Models & identities
   const [piModels, setPiModels] = useState<PiModel[]>([]);
   const [identities, setIdentities] = useState<ModelIdentity[]>([]);
+  const [modelSettings, setModelSettings] = useState<ModelSetting[]>([]);
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<Message | null>(null);
 
-  // Identity modal
+  // Modal state
   const [showModal, setShowModal] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [formName, setFormName] = useState("");
-  const [formProvider, setFormProvider] = useState("");
-  const [formModel, setFormModel] = useState("");
-  const [formThinking, setFormThinking] = useState("medium");
-  const [formEnabled, setFormEnabled] = useState(true);
+  const [modalProvider, setModalProvider] = useState("");
+  const [modalModel, setModalModel] = useState("");
 
   const loadData = useCallback(async () => {
     setLoading(true);
     setMessage(null);
     try {
-      const [models, ids] = await Promise.all([
+      const [models, ids, settings] = await Promise.all([
         fetchPiModels(),
         fetchModelIdentities(),
+        fetchModelSettings(),
       ]);
       setPiModels(models);
       setIdentities(ids);
+      setModelSettings(settings);
     } catch (err) {
       setMessage({
         type: "error",
@@ -66,13 +65,15 @@ export function SettingsPanel() {
       setLoading(true);
       setMessage(null);
       try {
-        const [models, ids] = await Promise.all([
+        const [models, ids, settings] = await Promise.all([
           fetchPiModels(),
           fetchModelIdentities(),
+          fetchModelSettings(),
         ]);
         if (cancelled) return;
         setPiModels(models);
         setIdentities(ids);
+        setModelSettings(settings);
       } catch (err) {
         if (cancelled) return;
         setMessage({
@@ -91,78 +92,83 @@ export function SettingsPanel() {
     };
   }, [showSettings]);
 
-  const openAddModal = (provider?: string, model?: string) => {
-    setEditingId(null);
-    setFormName("");
-    setFormProvider(provider || "");
-    setFormModel(model || "");
-    setFormThinking("medium");
-    setFormEnabled(true);
-    setShowModal(true);
-  };
+  // ESC to close settings panel (only when modal is not open)
+  useEffect(() => {
+    if (!showSettings) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !showModal) {
+        closeSettings();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [showSettings, showModal, closeSettings]);
 
-  const openEditModal = (identity: ModelIdentity) => {
-    setEditingId(identity.id);
-    setFormName(identity.name);
-    setFormProvider(identity.provider);
-    setFormModel(identity.model);
-    setFormThinking(identity.thinkingLevel);
-    setFormEnabled(identity.enabled);
+  const openModal = (provider: string, model: string) => {
+    setModalProvider(provider);
+    setModalModel(model);
     setShowModal(true);
   };
 
   const closeModal = () => {
     setShowModal(false);
-    setEditingId(null);
   };
 
-  const handleSaveIdentity = async () => {
-    if (!formName.trim() || !formProvider.trim() || !formModel.trim()) return;
-    setSaving(true);
-    setMessage(null);
+  const handleToggleModel = async (
+    provider: string,
+    model: string,
+    enabled: boolean,
+  ) => {
     try {
-      const payload = {
-        name: formName.trim(),
-        provider: formProvider.trim(),
-        model: formModel.trim(),
-        thinkingLevel: formThinking,
-        enabled: formEnabled,
-      };
-      if (editingId !== null) {
-        await updateModelIdentity(editingId, payload);
-        setMessage({ type: "success", text: "身份已更新" });
-      } else {
-        await createModelIdentity(payload);
-        setMessage({ type: "success", text: "身份已创建" });
-      }
-      closeModal();
-      await loadData();
+      const updated = await updateModelSetting({ provider, model, enabled });
+      setModelSettings((prev) => {
+        const exists = prev.find(
+          (s) => s.provider === provider && s.model === model,
+        );
+        if (exists) {
+          return prev.map((s) =>
+            s.provider === provider && s.model === model ? updated : s,
+          );
+        }
+        return [...prev, updated];
+      });
     } catch (err) {
       setMessage({
         type: "error",
-        text: err instanceof Error ? err.message : "保存失败",
+        text: err instanceof Error ? err.message : "更新失败",
       });
-    } finally {
-      setSaving(false);
     }
   };
 
-  const handleDeleteIdentity = async (id: number) => {
-    if (!confirm("确定要删除这个身份吗？")) return;
-    setSaving(true);
-    setMessage(null);
-    try {
-      await deleteModelIdentity(id);
-      await loadData();
-      setMessage({ type: "success", text: "身份已删除" });
-    } catch (err) {
-      setMessage({
-        type: "error",
-        text: err instanceof Error ? err.message : "删除失败",
-      });
-    } finally {
-      setSaving(false);
-    }
+  const handleSaveIdentity = async (
+    payload: Omit<ModelIdentity, "id" | "sortOrder" | "createdAt">,
+  ) => {
+    await createModelIdentity(payload);
+    setMessage({ type: "success", text: "身份已创建" });
+    await loadData();
+  };
+
+  const handleUpdateIdentity = async (
+    id: number,
+    payload: Omit<ModelIdentity, "id" | "sortOrder" | "createdAt">,
+  ) => {
+    await updateModelIdentity(id, payload);
+    setMessage({ type: "success", text: "身份已更新" });
+    await loadData();
+  };
+
+  const isModelEnabled = (provider: string, model: string) => {
+    const setting = modelSettings.find(
+      (s) => s.provider === provider && s.model === model,
+    );
+    return setting?.enabled ?? true;
+  };
+
+  const getIdentityForModel = (provider: string, model: string) => {
+    return (
+      identities.find((i) => i.provider === provider && i.model === model) ||
+      null
+    );
   };
 
   if (!showSettings) return null;
@@ -230,10 +236,10 @@ export function SettingsPanel() {
             <ModelsTab
               piModels={piModels}
               identities={identities}
+              modelSettings={modelSettings}
               loading={loading}
-              onAddIdentity={openAddModal}
-              onEditIdentity={openEditModal}
-              onDeleteIdentity={handleDeleteIdentity}
+              onOpenSettings={openModal}
+              onToggleModel={handleToggleModel}
             />
           )}
 
@@ -241,25 +247,19 @@ export function SettingsPanel() {
         </div>
       </div>
 
-      <IdentityModal
+      <ModelSettingsModal
+        key={`${modalProvider}-${modalModel}`}
         show={showModal}
-        editingId={editingId}
-        piModels={piModels}
-        formName={formName}
-        formProvider={formProvider}
-        formModel={formModel}
-        formThinking={formThinking}
-        formEnabled={formEnabled}
-        saving={saving}
-        onNameChange={setFormName}
-        onModelSelect={(p, m) => {
-          setFormProvider(p);
-          setFormModel(m);
-        }}
-        onThinkingChange={setFormThinking}
-        onEnabledChange={setFormEnabled}
+        provider={modalProvider}
+        model={modalModel}
+        modelEnabled={isModelEnabled(modalProvider, modalModel)}
+        identity={getIdentityForModel(modalProvider, modalModel)}
+        onClose={closeModal}
+        onModelEnableChange={(enabled) =>
+          handleToggleModel(modalProvider, modalModel, enabled)
+        }
         onSave={handleSaveIdentity}
-        onCancel={closeModal}
+        onUpdate={handleUpdateIdentity}
       />
     </div>
   );

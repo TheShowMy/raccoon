@@ -1,15 +1,5 @@
-import {
-  Cpu,
-  Brain,
-  ImageIcon,
-  Plus,
-  Check,
-  AlertCircle,
-  Pencil,
-  Trash2,
-} from "lucide-react";
-import type { PiModel, ModelIdentity } from "../api/client";
-import { THINKING_LABELS } from "./IdentityModal";
+import { Cpu, Brain, ImageIcon, Cog } from "lucide-react";
+import type { PiModel, ModelIdentity, ModelSetting } from "../api/client";
 
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -20,22 +10,37 @@ function formatTokens(n: number): string {
 interface ModelsTabProps {
   piModels: PiModel[];
   identities: ModelIdentity[];
+  modelSettings: ModelSetting[];
   loading: boolean;
-  onAddIdentity: (provider?: string, model?: string) => void;
-  onEditIdentity: (identity: ModelIdentity) => void;
-  onDeleteIdentity: (id: number) => void;
+  onOpenSettings: (provider: string, model: string) => void;
+  onToggleModel: (provider: string, model: string, enabled: boolean) => void;
 }
 
 export function ModelsTab({
   piModels,
   identities,
+  modelSettings,
   loading,
-  onAddIdentity,
-  onEditIdentity,
-  onDeleteIdentity,
+  onOpenSettings,
+  onToggleModel,
 }: ModelsTabProps) {
+  const isModelEnabled = (provider: string, model: string) => {
+    const setting = modelSettings.find(
+      (s) => s.provider === provider && s.model === model,
+    );
+    return setting?.enabled ?? true;
+  };
+
   const getIdentitiesForModel = (provider: string, model: string) =>
     identities.filter((i) => i.provider === provider && i.model === model);
+
+  // Sort: enabled models first, then disabled
+  const sortedModels = [...piModels].sort((a, b) => {
+    const aEnabled = isModelEnabled(a.provider, a.id);
+    const bEnabled = isModelEnabled(b.provider, b.id);
+    if (aEnabled === bEnabled) return 0;
+    return aEnabled ? -1 : 1;
+  });
 
   if (loading) {
     return (
@@ -53,27 +58,25 @@ export function ModelsTab({
         <p className="text-xs text-slate-300">
           配置 Provider 认证后，pi 会自动列出可用模型
         </p>
-        <button
-          onClick={() => onAddIdentity()}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm text-amber-600 bg-amber-50 rounded-lg hover:bg-amber-100 transition-colors"
-        >
-          <Plus className="w-4 h-4" />
-          手动添加模型身份
-        </button>
       </div>
     );
   }
 
   return (
     <div className="space-y-4">
-      {piModels.map((m) => {
+      {sortedModels.map((m) => {
         const modelIdentities = getIdentitiesForModel(m.provider, m.id);
         const enabledCount = modelIdentities.filter((i) => i.enabled).length;
+        const modelEnabled = isModelEnabled(m.provider, m.id);
 
         return (
           <div
             key={`${m.provider}-${m.id}`}
-            className="bg-slate-50 rounded-xl border border-slate-100 overflow-hidden"
+            className={`bg-slate-50 rounded-xl border overflow-hidden transition-opacity ${
+              modelEnabled
+                ? "border-slate-100 opacity-100"
+                : "border-slate-200 opacity-60"
+            }`}
           >
             {/* Model header */}
             <div className="px-4 py-3 flex items-center justify-between">
@@ -89,76 +92,52 @@ export function ModelsTab({
                   </p>
                 </div>
               </div>
-              <div className="flex items-center gap-3 text-xs text-slate-400">
-                {m.reasoning && (
-                  <span className="flex items-center gap-1">
-                    <Brain className="w-3 h-3" />
-                    思考
-                  </span>
-                )}
-                {m.input.includes("image") && (
-                  <span className="flex items-center gap-1">
-                    <ImageIcon className="w-3 h-3" />
-                    图片
-                  </span>
-                )}
-                <span className="text-slate-300">|</span>
-                <span>
-                  身份 {modelIdentities.length} · 启用 {enabledCount}
-                </span>
-              </div>
-            </div>
-
-            {/* Identities */}
-            {modelIdentities.length > 0 && (
-              <div className="px-4 pb-3 flex flex-wrap gap-2">
-                {modelIdentities.map((identity) => (
-                  <div
-                    key={identity.id}
-                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm border ${
-                      identity.enabled
-                        ? "bg-white border-slate-200 text-slate-700"
-                        : "bg-slate-100 border-slate-100 text-slate-400"
-                    }`}
-                  >
-                    {identity.enabled ? (
-                      <Check className="w-3.5 h-3.5 text-emerald-500" />
-                    ) : (
-                      <AlertCircle className="w-3.5 h-3.5 text-slate-300" />
-                    )}
-                    <span className="font-medium">{identity.name}</span>
-                    <span className="text-xs text-slate-400">
-                      {THINKING_LABELS[identity.thinkingLevel] ||
-                        identity.thinkingLevel}
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 text-xs text-slate-400">
+                  {m.reasoning && (
+                    <span className="flex items-center gap-1">
+                      <Brain className="w-3 h-3" />
+                      思考
                     </span>
-                    <button
-                      onClick={() => onEditIdentity(identity)}
-                      className="p-0.5 text-slate-300 hover:text-slate-500 transition-colors"
-                      title="编辑"
-                    >
-                      <Pencil className="w-3 h-3" />
-                    </button>
-                    <button
-                      onClick={() => onDeleteIdentity(identity.id)}
-                      className="p-0.5 text-slate-300 hover:text-rose-500 transition-colors"
-                      title="删除"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  </div>
-                ))}
+                  )}
+                  {m.input.includes("image") && (
+                    <span className="flex items-center gap-1">
+                      <ImageIcon className="w-3 h-3" />
+                      图片
+                    </span>
+                  )}
+                  <span className="text-slate-300">|</span>
+                  <span>
+                    身份 {modelIdentities.length} · 启用 {enabledCount}
+                  </span>
+                </div>
+                {/* Enable toggle */}
+                <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={modelEnabled}
+                    onChange={(e) =>
+                      onToggleModel(m.provider, m.id, e.target.checked)
+                    }
+                    className="w-4 h-4 rounded border-slate-300 text-amber-500 focus:ring-amber-400"
+                  />
+                  <span
+                    className={
+                      modelEnabled ? "text-slate-600" : "text-slate-400"
+                    }
+                  >
+                    启用
+                  </span>
+                </label>
+                {/* Settings button */}
+                <button
+                  onClick={() => onOpenSettings(m.provider, m.id)}
+                  className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors"
+                  title="设置"
+                >
+                  <Cog className="w-4 h-4" />
+                </button>
               </div>
-            )}
-
-            {/* Add button */}
-            <div className="px-4 pb-3">
-              <button
-                onClick={() => onAddIdentity(m.provider, m.id)}
-                className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-amber-600 transition-colors"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                添加身份
-              </button>
             </div>
           </div>
         );
