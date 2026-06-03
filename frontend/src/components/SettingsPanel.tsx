@@ -1,17 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  X,
-  Settings,
-  Cpu,
-  KeyRound,
-  Brain,
-  ImageIcon,
-  Plus,
-  Trash2,
-  Pencil,
-  Check,
-  AlertCircle,
-} from "lucide-react";
+import { X, Settings, Cpu, KeyRound } from "lucide-react";
 import { useAppStore } from "../stores/useAppStore";
 import {
   fetchPiModels,
@@ -21,25 +9,13 @@ import {
   deleteModelIdentity,
 } from "../api/client";
 import type { PiModel, ModelIdentity } from "../api/client";
+import { ModelsTab } from "./ModelsTab";
+import { IdentityModal } from "./IdentityModal";
+import { AlertCircle } from "lucide-react";
 
 type Tab = "models" | "auth";
 
 type Message = { type: "success" | "error"; text: string };
-
-const THINKING_LABELS: Record<string, string> = {
-  off: "关闭",
-  minimal: "最小",
-  low: "低",
-  medium: "中",
-  high: "高",
-  xhigh: "极高",
-};
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return n.toString();
-}
 
 export function SettingsPanel() {
   const { showSettings, closeSettings } = useAppStore();
@@ -189,9 +165,6 @@ export function SettingsPanel() {
     }
   };
 
-  const getIdentitiesForModel = (provider: string, model: string) =>
-    identities.filter((i) => i.provider === provider && i.model === model);
-
   if (!showSettings) return null;
 
   return (
@@ -254,278 +227,43 @@ export function SettingsPanel() {
           )}
 
           {activeTab === "models" && (
-            <div className="space-y-4">
-              {loading ? (
-                <div className="flex items-center justify-center py-12">
-                  <div className="w-5 h-5 border-2 border-slate-300 border-t-amber-400 rounded-full animate-spin" />
-                  <span className="ml-2 text-sm text-slate-400">加载中...</span>
-                </div>
-              ) : piModels.length === 0 ? (
-                <div className="text-center py-12 space-y-3">
-                  <p className="text-sm text-slate-400">暂无可用模型</p>
-                  <p className="text-xs text-slate-300">
-                    配置 Provider 认证后，pi 会自动列出可用模型
-                  </p>
-                  <button
-                    onClick={() => openAddModal()}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 text-sm text-amber-600 bg-amber-50 rounded-lg hover:bg-amber-100 transition-colors"
-                  >
-                    <Plus className="w-4 h-4" />
-                    手动添加模型身份
-                  </button>
-                </div>
-              ) : (
-                piModels.map((m) => {
-                  const modelIdentities = getIdentitiesForModel(
-                    m.provider,
-                    m.id,
-                  );
-                  const enabledCount = modelIdentities.filter(
-                    (i) => i.enabled,
-                  ).length;
-
-                  return (
-                    <div
-                      key={`${m.provider}-${m.id}`}
-                      className="bg-slate-50 rounded-xl border border-slate-100 overflow-hidden"
-                    >
-                      {/* Model header */}
-                      <div className="px-4 py-3 flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 rounded-lg bg-white border border-slate-200 flex items-center justify-center">
-                            <Cpu className="w-4 h-4 text-slate-500" />
-                          </div>
-                          <div>
-                            <p className="text-sm font-semibold text-slate-800">
-                              {m.id}
-                            </p>
-                            <p className="text-xs text-slate-400">
-                              {m.provider} · 上下文{" "}
-                              {formatTokens(m.contextWindow)} · 输出{" "}
-                              {formatTokens(m.maxTokens)}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-3 text-xs text-slate-400">
-                          {m.reasoning && (
-                            <span className="flex items-center gap-1">
-                              <Brain className="w-3 h-3" />
-                              思考
-                            </span>
-                          )}
-                          {m.input.includes("image") && (
-                            <span className="flex items-center gap-1">
-                              <ImageIcon className="w-3 h-3" />
-                              图片
-                            </span>
-                          )}
-                          <span className="text-slate-300">|</span>
-                          <span>
-                            身份 {modelIdentities.length} · 启用 {enabledCount}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Identities */}
-                      {modelIdentities.length > 0 && (
-                        <div className="px-4 pb-3 flex flex-wrap gap-2">
-                          {modelIdentities.map((identity) => (
-                            <div
-                              key={identity.id}
-                              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm border ${
-                                identity.enabled
-                                  ? "bg-white border-slate-200 text-slate-700"
-                                  : "bg-slate-100 border-slate-100 text-slate-400"
-                              }`}
-                            >
-                              {identity.enabled ? (
-                                <Check className="w-3.5 h-3.5 text-emerald-500" />
-                              ) : (
-                                <AlertCircle className="w-3.5 h-3.5 text-slate-300" />
-                              )}
-                              <span className="font-medium">
-                                {identity.name}
-                              </span>
-                              <span className="text-xs text-slate-400">
-                                {THINKING_LABELS[identity.thinkingLevel] ||
-                                  identity.thinkingLevel}
-                              </span>
-                              <button
-                                onClick={() => openEditModal(identity)}
-                                className="p-0.5 text-slate-300 hover:text-slate-500 transition-colors"
-                                title="编辑"
-                              >
-                                <Pencil className="w-3 h-3" />
-                              </button>
-                              <button
-                                onClick={() =>
-                                  handleDeleteIdentity(identity.id)
-                                }
-                                className="p-0.5 text-slate-300 hover:text-rose-500 transition-colors"
-                                title="删除"
-                              >
-                                <Trash2 className="w-3 h-3" />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-
-                      {/* Add button */}
-                      <div className="px-4 pb-3">
-                        <button
-                          onClick={() => openAddModal(m.provider, m.id)}
-                          className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-amber-600 transition-colors"
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                          添加身份
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
+            <ModelsTab
+              piModels={piModels}
+              identities={identities}
+              loading={loading}
+              onAddIdentity={openAddModal}
+              onEditIdentity={openEditModal}
+              onDeleteIdentity={handleDeleteIdentity}
+            />
           )}
 
           {activeTab === "auth" && <AuthTab />}
         </div>
       </div>
 
-      {/* Identity Modal */}
-      {showModal && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60]">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md mx-4 p-6">
-            <h3 className="text-base font-bold text-slate-900 mb-4">
-              {editingId !== null ? "编辑身份" : "添加身份"}
-            </h3>
-
-            <div className="space-y-4">
-              {piModels.length > 0 ? (
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    模型
-                  </label>
-                  <select
-                    value={`${formProvider}|${formModel}`}
-                    onChange={(e) => {
-                      const [p, m] = e.target.value.split("|");
-                      setFormProvider(p);
-                      setFormModel(m);
-                    }}
-                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-amber-400"
-                  >
-                    {piModels.map((m) => (
-                      <option
-                        key={`${m.provider}-${m.id}`}
-                        value={`${m.provider}|${m.id}`}
-                      >
-                        {m.provider} / {m.id}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">
-                      Provider
-                    </label>
-                    <input
-                      type="text"
-                      value={formProvider}
-                      onChange={(e) => setFormProvider(e.target.value)}
-                      placeholder="例如：anthropic"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">
-                      Model
-                    </label>
-                    <input
-                      type="text"
-                      value={formModel}
-                      onChange={(e) => setFormModel(e.target.value)}
-                      placeholder="例如：claude-sonnet-4-6"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
-                    />
-                  </div>
-                </div>
-              )}
-
-              <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">
-                  身份名称
-                </label>
-                <input
-                  type="text"
-                  value={formName}
-                  onChange={(e) => setFormName(e.target.value)}
-                  placeholder="例如：快速模式"
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">
-                  Thinking Level
-                </label>
-                <select
-                  value={formThinking}
-                  onChange={(e) => setFormThinking(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-amber-400"
-                >
-                  {Object.entries(THINKING_LABELS).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  id="enabled"
-                  checked={formEnabled}
-                  onChange={(e) => setFormEnabled(e.target.checked)}
-                  className="w-4 h-4 rounded border-slate-300 text-amber-500 focus:ring-amber-400"
-                />
-                <label htmlFor="enabled" className="text-sm text-slate-700">
-                  启用
-                </label>
-              </div>
-            </div>
-
-            <div className="flex justify-end gap-2 mt-6">
-              <button
-                onClick={closeModal}
-                className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 transition-colors"
-              >
-                取消
-              </button>
-              <button
-                onClick={handleSaveIdentity}
-                disabled={
-                  saving ||
-                  !formName.trim() ||
-                  !formProvider.trim() ||
-                  !formModel.trim()
-                }
-                className="px-5 py-2 bg-slate-900 text-white text-sm rounded-lg hover:bg-slate-800 transition-all active:scale-[0.98] disabled:opacity-50"
-              >
-                {saving ? "保存中..." : "保存"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <IdentityModal
+        show={showModal}
+        editingId={editingId}
+        piModels={piModels}
+        formName={formName}
+        formProvider={formProvider}
+        formModel={formModel}
+        formThinking={formThinking}
+        formEnabled={formEnabled}
+        saving={saving}
+        onNameChange={setFormName}
+        onModelSelect={(p, m) => {
+          setFormProvider(p);
+          setFormModel(m);
+        }}
+        onThinkingChange={setFormThinking}
+        onEnabledChange={setFormEnabled}
+        onSave={handleSaveIdentity}
+        onCancel={closeModal}
+      />
     </div>
   );
 }
-
-// ===== Provider Auth Tab (simplified) =====
 
 function AuthTab() {
   return (

@@ -347,7 +347,8 @@ fn write_pi_settings(settings: &PiSettings) -> Result<(), anyhow::Error> {
     let path = pi_settings_path();
     let mut value = if path.exists() {
         let content = std::fs::read_to_string(&path)?;
-        serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
+        serde_json::from_str(&content)
+            .with_context(|| format!("解析 Pi settings 失败: {}", path.display()))?
     } else {
         json!({})
     };
@@ -377,7 +378,8 @@ fn write_pi_auth(provider: &str, key: &str) -> Result<(), anyhow::Error> {
     let path = pi_auth_path();
     let mut value = if path.exists() {
         let content = std::fs::read_to_string(&path)?;
-        serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
+        serde_json::from_str(&content)
+            .with_context(|| format!("解析 Pi auth 失败: {}", path.display()))?
     } else {
         json!({})
     };

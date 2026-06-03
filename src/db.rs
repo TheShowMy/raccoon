@@ -136,8 +136,7 @@ pub async fn create_model_identity(
     // 获取当前最大 sort_order
     let max_order: Option<i64> = sqlx::query_scalar("SELECT MAX(sort_order) FROM model_identities")
         .fetch_one(pool)
-        .await
-        .unwrap_or(None);
+        .await?;
     let sort_order = max_order.unwrap_or(0) + 1;
 
     let id = sqlx::query(

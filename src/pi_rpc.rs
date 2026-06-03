@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -71,26 +71,7 @@ impl PiRpcClient {
 
         // Drain stderr in background so the pipe doesn't block
         if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stderr);
-                let mut buf = String::new();
-                loop {
-                    buf.clear();
-                    match reader.read_line(&mut buf).await {
-                        Ok(0) => break,
-                        Ok(_) => {
-                            let t = buf.trim();
-                            if !t.is_empty() {
-                                tracing::debug!(target: "pi_stderr", "{}", t);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::debug!("pi stderr read error: {}", e);
-                            break;
-                        }
-                    }
-                }
-            });
+            spawn_stderr_drain(stderr);
         }
 
         let client = Self {
@@ -231,4 +212,28 @@ fn find_pi_binary() -> Result<String> {
     }
 
     Ok("pi".to_string())
+}
+
+/// Spawn a background task that drains pi's stderr to prevent the pipe from blocking.
+fn spawn_stderr_drain(stderr: ChildStderr) {
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let mut buf = String::new();
+        loop {
+            buf.clear();
+            match reader.read_line(&mut buf).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    let t = buf.trim();
+                    if !t.is_empty() {
+                        tracing::debug!(target: "pi_stderr", "{}", t);
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("pi stderr read error: {}", e);
+                    break;
+                }
+            }
+        }
+    });
 }
