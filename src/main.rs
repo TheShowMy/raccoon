@@ -245,6 +245,7 @@ fn pi_auth_path() -> PathBuf {
 
 /// Pi settings.json 结构
 #[derive(Debug, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct PiSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     last_changelog_version: Option<String>,
