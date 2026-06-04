@@ -75,74 +75,196 @@ export async function fetchPiModels(): Promise<PiModel[]> {
   return handleResponse<PiModel[]>(res);
 }
 
-// ===== Model Identity API =====
+// ===== System Config API =====
 
-export interface ModelIdentity {
+export interface SystemConfig {
   id: number;
-  name: string;
-  provider: string;
-  model: string;
-  thinkingLevel: string;
-  enabled: boolean;
-  sortOrder: number;
-  createdAt: string;
+  coordinatorProvider: string;
+  coordinatorModel: string;
+  updatedAt: string;
 }
 
-export async function fetchModelIdentities(): Promise<ModelIdentity[]> {
-  const res = await fetch("/api/model-identities");
-  return handleResponse<ModelIdentity[]>(res);
+export async function fetchSystemConfig(): Promise<SystemConfig> {
+  const res = await fetch("/api/system-config");
+  return handleResponse<SystemConfig>(res);
 }
 
-export async function createModelIdentity(
-  identity: Omit<ModelIdentity, "id" | "sortOrder" | "createdAt">,
-): Promise<ModelIdentity> {
-  const res = await fetch("/api/model-identities", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(identity),
-  });
-  return handleResponse<ModelIdentity>(res);
-}
-
-export async function updateModelIdentity(
-  id: number,
-  identity: Omit<ModelIdentity, "id" | "sortOrder" | "createdAt">,
+export async function updateSystemConfig(
+  config: Omit<SystemConfig, "id" | "updatedAt">,
 ): Promise<boolean> {
-  const res = await fetch(`/api/model-identities/${id}`, {
+  const res = await fetch("/api/system-config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(identity),
+    body: JSON.stringify(config),
   });
   return handleResponse<boolean>(res);
 }
 
-export async function deleteModelIdentity(id: number): Promise<boolean> {
-  const res = await fetch(`/api/model-identities/${id}`, {
+// ===== Worker Model Tier API =====
+
+export interface WorkerModelTier {
+  id: number;
+  identity: string;
+  tierLevel: number;
+  provider: string;
+  model: string;
+  description: string;
+  createdAt: string;
+}
+
+export async function fetchWorkerTiers(): Promise<WorkerModelTier[]> {
+  const res = await fetch("/api/worker-tiers");
+  return handleResponse<WorkerModelTier[]>(res);
+}
+
+export async function createWorkerTier(
+  tier: Omit<WorkerModelTier, "id" | "createdAt">,
+): Promise<WorkerModelTier> {
+  const res = await fetch("/api/worker-tiers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(tier),
+  });
+  return handleResponse<WorkerModelTier>(res);
+}
+
+export async function updateWorkerTier(
+  id: number,
+  tier: Omit<WorkerModelTier, "id" | "createdAt">,
+): Promise<boolean> {
+  const res = await fetch(`/api/worker-tiers/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(tier),
+  });
+  return handleResponse<boolean>(res);
+}
+
+export async function deleteWorkerTier(id: number): Promise<boolean> {
+  const res = await fetch(`/api/worker-tiers/${id}`, {
     method: "DELETE",
   });
   return handleResponse<boolean>(res);
 }
 
-// ===== Model Settings API =====
+// ===== Task Thinking Policies API =====
 
-export interface ModelSetting {
-  provider: string;
-  model: string;
-  enabled: boolean;
+export interface TaskThinkingPolicy {
+  taskType: string;
+  defaultLevel: string;
 }
 
-export async function fetchModelSettings(): Promise<ModelSetting[]> {
-  const res = await fetch("/api/model-settings");
-  return handleResponse<ModelSetting[]>(res);
+export async function fetchThinkingPolicies(): Promise<TaskThinkingPolicy[]> {
+  const res = await fetch("/api/thinking-policies");
+  return handleResponse<TaskThinkingPolicy[]>(res);
 }
 
-export async function updateModelSetting(
-  setting: ModelSetting,
-): Promise<ModelSetting> {
-  const res = await fetch("/api/model-settings", {
-    method: "PUT",
+// ===== Job / Clarification API =====
+
+export type JobStatus = "clarifying" | "draft_ready" | "confirmed" | string;
+
+export interface Job {
+  id: number;
+  projectId: number;
+  title: string;
+  originalRequirement: string;
+  status: JobStatus;
+  currentStage: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface JobMessage {
+  id: number;
+  jobId: number;
+  role: "user" | "coordinator" | "system" | string;
+  content: string;
+  createdAt: string;
+}
+
+export interface ClarificationOption {
+  label: string;
+  description: string;
+  recommended: boolean;
+}
+
+export interface ClarificationAnswer {
+  selectedOptions: string[];
+  customText?: string;
+}
+
+export interface ClarificationItem {
+  id: number;
+  jobId: number;
+  question: string;
+  questionType: "single_choice" | "multi_choice" | "free_text" | string;
+  options: ClarificationOption[];
+  allowCustom: boolean;
+  answer?: ClarificationAnswer;
+  answeredAt?: string;
+  createdAt: string;
+}
+
+export interface TaskDraft {
+  id: number;
+  jobId: number;
+  title: string;
+  description: string;
+  acceptanceCriteria: string[];
+  status: string;
+  createdAt: string;
+}
+
+export interface JobDetail {
+  job: Job;
+  messages: JobMessage[];
+  clarifications: ClarificationItem[];
+  taskDrafts: TaskDraft[];
+}
+
+export interface SubmitClarificationAnswer {
+  clarificationId: number;
+  selectedOptions: string[];
+  customText?: string;
+}
+
+export async function fetchProjectJobs(projectId: number): Promise<Job[]> {
+  const res = await fetch(`/api/projects/${projectId}/jobs`);
+  return handleResponse<Job[]>(res);
+}
+
+export async function createJob(
+  projectId: number,
+  requirement: string,
+): Promise<JobDetail> {
+  const res = await fetch(`/api/projects/${projectId}/jobs`, {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(setting),
+    body: JSON.stringify({ requirement }),
   });
-  return handleResponse<ModelSetting>(res);
+  return handleResponse<JobDetail>(res);
+}
+
+export async function fetchJobDetail(jobId: number): Promise<JobDetail> {
+  const res = await fetch(`/api/jobs/${jobId}`);
+  return handleResponse<JobDetail>(res);
+}
+
+export async function submitClarifications(
+  jobId: number,
+  answers: SubmitClarificationAnswer[],
+): Promise<JobDetail> {
+  const res = await fetch(`/api/jobs/${jobId}/clarifications`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ answers }),
+  });
+  return handleResponse<JobDetail>(res);
+}
+
+export async function confirmJob(jobId: number): Promise<JobDetail> {
+  const res = await fetch(`/api/jobs/${jobId}/confirm`, {
+    method: "POST",
+  });
+  return handleResponse<JobDetail>(res);
 }

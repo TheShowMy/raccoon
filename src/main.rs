@@ -120,6 +120,16 @@ fn create_router(pool: Pool<Sqlite>, pi_client: std::sync::Arc<pi_rpc::PiRpcClie
             "/api/projects",
             get(list_projects_handler).post(create_project_handler),
         )
+        .route(
+            "/api/projects/:id/jobs",
+            get(list_project_jobs_handler).post(create_job_handler),
+        )
+        .route("/api/jobs/:id", get(get_job_handler))
+        .route(
+            "/api/jobs/:id/clarifications",
+            post(submit_clarifications_handler),
+        )
+        .route("/api/jobs/:id/confirm", post(confirm_job_handler))
         .route("/api/projects/:id", delete(delete_project_handler))
         .route("/api/pi-config", get(pi_config_handler))
         .route("/api/pi-config/settings", post(update_pi_settings_handler))
@@ -130,16 +140,20 @@ fn create_router(pool: Pool<Sqlite>, pi_client: std::sync::Arc<pi_rpc::PiRpcClie
         )
         .route("/api/models", get(list_models_handler))
         .route(
-            "/api/model-identities",
-            get(list_model_identities_handler).post(create_model_identity_handler),
+            "/api/system-config",
+            get(get_system_config_handler).put(update_system_config_handler),
         )
         .route(
-            "/api/model-identities/:id",
-            put(update_model_identity_handler).delete(delete_model_identity_handler),
+            "/api/worker-tiers",
+            get(list_worker_tiers_handler).post(create_worker_tier_handler),
         )
         .route(
-            "/api/model-settings",
-            get(list_model_settings_handler).put(update_model_setting_handler),
+            "/api/worker-tiers/:id",
+            put(update_worker_tier_handler).delete(delete_worker_tier_handler),
+        )
+        .route(
+            "/api/thinking-policies",
+            get(list_thinking_policies_handler),
         )
         .layer(Extension(pool))
         .layer(Extension(pi_client));
@@ -244,6 +258,109 @@ async fn delete_project_handler(
         Err(e) => {
             warn!("删除项目失败: {}", e);
             Json(ApiResponse::err(e.to_string()))
+        }
+    }
+}
+
+// ===== Job / 需求澄清 API =====
+
+#[derive(Debug, Deserialize)]
+struct CreateJobRequest {
+    requirement: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubmitClarificationsRequest {
+    answers: Vec<db::SubmitClarificationAnswer>,
+}
+
+async fn list_project_jobs_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+    Path(project_id): Path<i64>,
+) -> Json<ApiResponse<Vec<db::Job>>> {
+    match db::get_project_jobs(&pool, project_id).await {
+        Ok(jobs) => Json(ApiResponse::ok(jobs)),
+        Err(e) => {
+            warn!("获取 Job 列表失败: {}", e);
+            Json(ApiResponse::err(format!("获取失败: {}", e)))
+        }
+    }
+}
+
+async fn create_job_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+    Path(project_id): Path<i64>,
+    axum::extract::Json(req): axum::extract::Json<CreateJobRequest>,
+) -> Json<ApiResponse<db::JobDetail>> {
+    let requirement = req.requirement.trim();
+    if requirement.is_empty() {
+        return Json(ApiResponse::err("需求内容不能为空"));
+    }
+
+    let system_config = match db::get_system_config(&pool).await {
+        Ok(config) => config,
+        Err(e) => {
+            warn!("读取 Coordinator 配置失败: {}", e);
+            return Json(ApiResponse::err(format!(
+                "读取 Coordinator 配置失败: {}",
+                e
+            )));
+        }
+    };
+    if system_config.coordinator_provider.trim().is_empty()
+        || system_config.coordinator_model.trim().is_empty()
+    {
+        return Json(ApiResponse::err(
+            "请先在设置中配置 Coordinator 主模型，再提交需求",
+        ));
+    }
+
+    match db::create_job_with_clarifications(&pool, project_id, requirement).await {
+        Ok(detail) => Json(ApiResponse::ok(detail)),
+        Err(e) => {
+            warn!("创建 Job 失败: {}", e);
+            Json(ApiResponse::err(format!("创建失败: {}", e)))
+        }
+    }
+}
+
+async fn get_job_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+    Path(job_id): Path<i64>,
+) -> Json<ApiResponse<db::JobDetail>> {
+    match db::get_job_detail(&pool, job_id).await {
+        Ok(detail) => Json(ApiResponse::ok(detail)),
+        Err(e) => {
+            warn!("获取 Job 详情失败: {}", e);
+            Json(ApiResponse::err(format!("获取失败: {}", e)))
+        }
+    }
+}
+
+async fn submit_clarifications_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+    Path(job_id): Path<i64>,
+    axum::extract::Json(req): axum::extract::Json<SubmitClarificationsRequest>,
+) -> Json<ApiResponse<db::JobDetail>> {
+    match db::submit_clarification_answers(&pool, job_id, &req.answers).await {
+        Ok(detail) => Json(ApiResponse::ok(detail)),
+        Err(e) => {
+            warn!("提交澄清答案失败: {}", e);
+            Json(ApiResponse::err(format!("提交失败: {}", e)))
+        }
+    }
+}
+
+async fn confirm_job_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+    Path(job_id): Path<i64>,
+) -> Json<ApiResponse<db::JobDetail>> {
+    match db::confirm_job(&pool, job_id).await {
+        Ok(detail) => Json(ApiResponse::ok(detail)),
+        Err(e) => {
+            warn!("确认 Job 失败: {}", e);
+            Json(ApiResponse::err(format!("确认失败: {}", e)))
         }
     }
 }
@@ -512,153 +629,177 @@ async fn list_models_handler(
     }
 }
 
-// ===== 模型身份 CRUD =====
+// ===== System Config API =====
 
-async fn list_model_identities_handler(
+async fn get_system_config_handler(
     Extension(pool): Extension<Pool<Sqlite>>,
-) -> Json<ApiResponse<Vec<db::ModelIdentity>>> {
-    match db::get_model_identities(&pool).await {
-        Ok(identities) => Json(ApiResponse::ok(identities)),
+) -> Json<ApiResponse<db::SystemConfig>> {
+    match db::get_system_config(&pool).await {
+        Ok(config) => Json(ApiResponse::ok(config)),
         Err(e) => {
-            warn!("获取模型身份列表失败: {}", e);
-            Json(ApiResponse::err(e.to_string()))
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateModelIdentityRequest {
-    name: String,
-    provider: String,
-    model: String,
-    #[serde(rename = "thinkingLevel")]
-    thinking_level: String,
-    enabled: bool,
-}
-
-async fn create_model_identity_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
-    axum::extract::Json(req): axum::extract::Json<CreateModelIdentityRequest>,
-) -> Json<ApiResponse<db::ModelIdentity>> {
-    if req.name.trim().is_empty() {
-        return Json(ApiResponse::err("身份名称不能为空"));
-    }
-    if req.provider.trim().is_empty() {
-        return Json(ApiResponse::err("Provider 不能为空"));
-    }
-    if req.model.trim().is_empty() {
-        return Json(ApiResponse::err("Model 不能为空"));
-    }
-
-    match db::create_model_identity(
-        &pool,
-        &req.name,
-        &req.provider,
-        &req.model,
-        &req.thinking_level,
-        req.enabled,
-    )
-    .await
-    {
-        Ok(identity) => Json(ApiResponse::ok(identity)),
-        Err(e) => {
-            warn!("创建模型身份失败: {}", e);
-            Json(ApiResponse::err(format!("创建失败: {}", e)))
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct UpdateModelIdentityRequest {
-    name: String,
-    provider: String,
-    model: String,
-    #[serde(rename = "thinkingLevel")]
-    thinking_level: String,
-    enabled: bool,
-}
-
-async fn update_model_identity_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
-    Path(id): Path<i64>,
-    axum::extract::Json(req): axum::extract::Json<UpdateModelIdentityRequest>,
-) -> Json<ApiResponse<bool>> {
-    if req.name.trim().is_empty() {
-        return Json(ApiResponse::err("身份名称不能为空"));
-    }
-    if req.provider.trim().is_empty() {
-        return Json(ApiResponse::err("Provider 不能为空"));
-    }
-    if req.model.trim().is_empty() {
-        return Json(ApiResponse::err("Model 不能为空"));
-    }
-
-    match db::update_model_identity(
-        &pool,
-        id,
-        &req.name,
-        &req.provider,
-        &req.model,
-        &req.thinking_level,
-        req.enabled,
-    )
-    .await
-    {
-        Ok(updated) => Json(ApiResponse::ok(updated)),
-        Err(e) => {
-            warn!("更新模型身份失败: {}", e);
-            Json(ApiResponse::err(format!("更新失败: {}", e)))
-        }
-    }
-}
-
-async fn delete_model_identity_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
-    Path(id): Path<i64>,
-) -> Json<ApiResponse<bool>> {
-    match db::delete_model_identity(&pool, id).await {
-        Ok(deleted) => Json(ApiResponse::ok(deleted)),
-        Err(e) => {
-            warn!("删除模型身份失败: {}", e);
-            Json(ApiResponse::err(format!("删除失败: {}", e)))
-        }
-    }
-}
-
-// ===== Model Settings API =====
-
-async fn list_model_settings_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
-) -> Json<ApiResponse<Vec<db::ModelSetting>>> {
-    match db::get_model_settings(&pool).await {
-        Ok(settings) => Json(ApiResponse::ok(settings)),
-        Err(e) => {
-            warn!("获取模型设置失败: {}", e);
+            warn!("获取系统配置失败: {}", e);
             Json(ApiResponse::err(format!("获取失败: {}", e)))
         }
     }
 }
 
 #[derive(Debug, Deserialize)]
-struct UpdateModelSettingRequest {
-    provider: String,
-    model: String,
-    enabled: bool,
+struct UpdateSystemConfigRequest {
+    #[serde(rename = "coordinatorProvider")]
+    coordinator_provider: String,
+    #[serde(rename = "coordinatorModel")]
+    coordinator_model: String,
 }
 
-async fn update_model_setting_handler(
+async fn update_system_config_handler(
     Extension(pool): Extension<Pool<Sqlite>>,
-    axum::extract::Json(req): axum::extract::Json<UpdateModelSettingRequest>,
-) -> Json<ApiResponse<db::ModelSetting>> {
-    if req.provider.trim().is_empty() || req.model.trim().is_empty() {
-        return Json(ApiResponse::err("Provider 和 Model 不能为空"));
+    axum::extract::Json(req): axum::extract::Json<UpdateSystemConfigRequest>,
+) -> Json<ApiResponse<bool>> {
+    if req.coordinator_provider.trim().is_empty() {
+        return Json(ApiResponse::err("Coordinator Provider 不能为空"));
+    }
+    if req.coordinator_model.trim().is_empty() {
+        return Json(ApiResponse::err("Coordinator Model 不能为空"));
     }
 
-    match db::upsert_model_setting(&pool, &req.provider, &req.model, req.enabled).await {
-        Ok(setting) => Json(ApiResponse::ok(setting)),
+    match db::update_system_config(&pool, &req.coordinator_provider, &req.coordinator_model).await {
+        Ok(()) => Json(ApiResponse::ok(true)),
         Err(e) => {
-            warn!("更新模型设置失败: {}", e);
+            warn!("更新系统配置失败: {}", e);
             Json(ApiResponse::err(format!("保存失败: {}", e)))
+        }
+    }
+}
+
+// ===== Worker Tier CRUD =====
+
+async fn list_worker_tiers_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+) -> Json<ApiResponse<Vec<db::WorkerModelTier>>> {
+    match db::get_worker_model_tiers(&pool).await {
+        Ok(tiers) => Json(ApiResponse::ok(tiers)),
+        Err(e) => {
+            warn!("获取 Worker Tier 列表失败: {}", e);
+            Json(ApiResponse::err(format!("获取失败: {}", e)))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateWorkerTierRequest {
+    identity: String,
+    #[serde(rename = "tierLevel")]
+    tier_level: i64,
+    provider: String,
+    model: String,
+    description: String,
+}
+
+async fn create_worker_tier_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+    axum::extract::Json(req): axum::extract::Json<CreateWorkerTierRequest>,
+) -> Json<ApiResponse<db::WorkerModelTier>> {
+    if req.identity.trim().is_empty() {
+        return Json(ApiResponse::err("Identity 不能为空"));
+    }
+    if req.provider.trim().is_empty() {
+        return Json(ApiResponse::err("Provider 不能为空"));
+    }
+    if req.model.trim().is_empty() {
+        return Json(ApiResponse::err("Model 不能为空"));
+    }
+    if req.tier_level < 1 {
+        return Json(ApiResponse::err("Tier Level 必须 >= 1"));
+    }
+
+    match db::create_worker_model_tier(
+        &pool,
+        &req.identity,
+        req.tier_level,
+        &req.provider,
+        &req.model,
+        &req.description,
+    )
+    .await
+    {
+        Ok(tier) => Json(ApiResponse::ok(tier)),
+        Err(e) => {
+            warn!("创建 Worker Tier 失败: {}", e);
+            Json(ApiResponse::err(format!("创建失败: {}", e)))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateWorkerTierRequest {
+    identity: String,
+    #[serde(rename = "tierLevel")]
+    tier_level: i64,
+    provider: String,
+    model: String,
+    description: String,
+}
+
+async fn update_worker_tier_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+    Path(id): Path<i64>,
+    axum::extract::Json(req): axum::extract::Json<UpdateWorkerTierRequest>,
+) -> Json<ApiResponse<bool>> {
+    if req.identity.trim().is_empty() {
+        return Json(ApiResponse::err("Identity 不能为空"));
+    }
+    if req.provider.trim().is_empty() {
+        return Json(ApiResponse::err("Provider 不能为空"));
+    }
+    if req.model.trim().is_empty() {
+        return Json(ApiResponse::err("Model 不能为空"));
+    }
+    if req.tier_level < 1 {
+        return Json(ApiResponse::err("Tier Level 必须 >= 1"));
+    }
+
+    match db::update_worker_model_tier(
+        &pool,
+        id,
+        &req.identity,
+        req.tier_level,
+        &req.provider,
+        &req.model,
+        &req.description,
+    )
+    .await
+    {
+        Ok(updated) => Json(ApiResponse::ok(updated)),
+        Err(e) => {
+            warn!("更新 Worker Tier 失败: {}", e);
+            Json(ApiResponse::err(format!("更新失败: {}", e)))
+        }
+    }
+}
+
+async fn delete_worker_tier_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+    Path(id): Path<i64>,
+) -> Json<ApiResponse<bool>> {
+    match db::delete_worker_model_tier(&pool, id).await {
+        Ok(deleted) => Json(ApiResponse::ok(deleted)),
+        Err(e) => {
+            warn!("删除 Worker Tier 失败: {}", e);
+            Json(ApiResponse::err(format!("删除失败: {}", e)))
+        }
+    }
+}
+
+// ===== Thinking Policies API =====
+
+async fn list_thinking_policies_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+) -> Json<ApiResponse<Vec<db::TaskThinkingPolicy>>> {
+    match db::get_task_thinking_policies(&pool).await {
+        Ok(policies) => Json(ApiResponse::ok(policies)),
+        Err(e) => {
+            warn!("获取思考策略列表失败: {}", e);
+            Json(ApiResponse::err(format!("获取失败: {}", e)))
         }
     }
 }

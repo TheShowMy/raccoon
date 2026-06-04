@@ -11,6 +11,7 @@ import {
   parseGitHost,
   formatRelativeTime,
 } from "../utils/format";
+import { JobWorkspace } from "./JobWorkspace";
 
 interface ProjectDetailProps {
   project: Project;
@@ -85,19 +86,13 @@ export function ProjectDetail({ project, onDelete }: ProjectDetailProps) {
         </div>
       </div>
 
-      {/* Content placeholder */}
       <div className="flex-1 p-8">
-        <div className="max-w-2xl">
+        <div className="max-w-6xl">
           <div className="flex items-center gap-2 mb-4">
             <div className="w-1 h-5 bg-amber-400 rounded-full" />
-            <h2 className="text-sm font-semibold text-slate-700">项目概览</h2>
+            <h2 className="text-sm font-semibold text-slate-700">任务工作台</h2>
           </div>
-
-          <div className="bg-slate-50 rounded-xl p-6 border border-slate-100">
-            <p className="text-sm text-slate-400 text-center py-8">
-              项目任务管理功能即将推出...
-            </p>
-          </div>
+          <JobWorkspace projectId={project.id} />
         </div>
       </div>
     </div>

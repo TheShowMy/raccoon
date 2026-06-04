@@ -3,15 +3,22 @@ import { X, Settings, Cpu, KeyRound } from "lucide-react";
 import { useAppStore } from "../stores/useAppStore";
 import {
   fetchPiModels,
-  fetchModelIdentities,
-  fetchModelSettings,
-  createModelIdentity,
-  updateModelIdentity,
-  updateModelSetting,
+  fetchSystemConfig,
+  fetchWorkerTiers,
+  fetchThinkingPolicies,
+  createWorkerTier,
+  updateWorkerTier,
+  deleteWorkerTier,
+  updateSystemConfig,
 } from "../api/client";
-import type { PiModel, ModelIdentity, ModelSetting } from "../api/client";
+import type {
+  PiModel,
+  SystemConfig,
+  WorkerModelTier,
+  TaskThinkingPolicy,
+} from "../api/client";
 import { ModelsTab } from "./ModelsTab";
-import { ModelSettingsModal } from "./ModelSettingsModal";
+import { WorkerTierModal } from "./WorkerTierModal";
 import { AlertCircle } from "lucide-react";
 
 type Tab = "models" | "auth";
@@ -22,30 +29,34 @@ export function SettingsPanel() {
   const { showSettings, closeSettings } = useAppStore();
   const [activeTab, setActiveTab] = useState<Tab>("models");
 
-  // Models & identities
+  // Data
   const [piModels, setPiModels] = useState<PiModel[]>([]);
-  const [identities, setIdentities] = useState<ModelIdentity[]>([]);
-  const [modelSettings, setModelSettings] = useState<ModelSetting[]>([]);
+  const [systemConfig, setSystemConfig] = useState<SystemConfig | null>(null);
+  const [workerTiers, setWorkerTiers] = useState<WorkerModelTier[]>([]);
+  const [thinkingPolicies, setThinkingPolicies] = useState<
+    TaskThinkingPolicy[]
+  >([]);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<Message | null>(null);
 
   // Modal state
   const [showModal, setShowModal] = useState(false);
-  const [modalProvider, setModalProvider] = useState("");
-  const [modalModel, setModalModel] = useState("");
+  const [editingTier, setEditingTier] = useState<WorkerModelTier | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     setMessage(null);
     try {
-      const [models, ids, settings] = await Promise.all([
+      const [models, config, tiers, policies] = await Promise.all([
         fetchPiModels(),
-        fetchModelIdentities(),
-        fetchModelSettings(),
+        fetchSystemConfig(),
+        fetchWorkerTiers(),
+        fetchThinkingPolicies(),
       ]);
       setPiModels(models);
-      setIdentities(ids);
-      setModelSettings(settings);
+      setSystemConfig(config);
+      setWorkerTiers(tiers);
+      setThinkingPolicies(policies);
     } catch (err) {
       setMessage({
         type: "error",
@@ -65,15 +76,17 @@ export function SettingsPanel() {
       setLoading(true);
       setMessage(null);
       try {
-        const [models, ids, settings] = await Promise.all([
+        const [models, config, tiers, policies] = await Promise.all([
           fetchPiModels(),
-          fetchModelIdentities(),
-          fetchModelSettings(),
+          fetchSystemConfig(),
+          fetchWorkerTiers(),
+          fetchThinkingPolicies(),
         ]);
         if (cancelled) return;
         setPiModels(models);
-        setIdentities(ids);
-        setModelSettings(settings);
+        setSystemConfig(config);
+        setWorkerTiers(tiers);
+        setThinkingPolicies(policies);
       } catch (err) {
         if (cancelled) return;
         setMessage({
@@ -104,34 +117,30 @@ export function SettingsPanel() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [showSettings, showModal, closeSettings]);
 
-  const openModal = (provider: string, model: string) => {
-    setModalProvider(provider);
-    setModalModel(model);
+  const openCreateModal = () => {
+    setEditingTier(null);
+    setShowModal(true);
+  };
+
+  const openEditModal = (tier: WorkerModelTier) => {
+    setEditingTier(tier);
     setShowModal(true);
   };
 
   const closeModal = () => {
     setShowModal(false);
+    setEditingTier(null);
   };
 
-  const handleToggleModel = async (
-    provider: string,
-    model: string,
-    enabled: boolean,
-  ) => {
+  const handleUpdateCoordinator = async (provider: string, model: string) => {
     try {
-      const updated = await updateModelSetting({ provider, model, enabled });
-      setModelSettings((prev) => {
-        const exists = prev.find(
-          (s) => s.provider === provider && s.model === model,
-        );
-        if (exists) {
-          return prev.map((s) =>
-            s.provider === provider && s.model === model ? updated : s,
-          );
-        }
-        return [...prev, updated];
+      await updateSystemConfig({
+        coordinatorProvider: provider,
+        coordinatorModel: model,
       });
+      setMessage({ type: "success", text: "主模型配置已更新" });
+      const config = await fetchSystemConfig();
+      setSystemConfig(config);
     } catch (err) {
       setMessage({
         type: "error",
@@ -140,35 +149,34 @@ export function SettingsPanel() {
     }
   };
 
-  const handleSaveIdentity = async (
-    payload: Omit<ModelIdentity, "id" | "sortOrder" | "createdAt">,
+  const handleSaveTier = async (
+    payload: Omit<WorkerModelTier, "id" | "createdAt">,
   ) => {
-    await createModelIdentity(payload);
-    setMessage({ type: "success", text: "身份已创建" });
+    await createWorkerTier(payload);
+    setMessage({ type: "success", text: "模型等级已创建" });
     await loadData();
   };
 
-  const handleUpdateIdentity = async (
+  const handleUpdateTier = async (
     id: number,
-    payload: Omit<ModelIdentity, "id" | "sortOrder" | "createdAt">,
+    payload: Omit<WorkerModelTier, "id" | "createdAt">,
   ) => {
-    await updateModelIdentity(id, payload);
-    setMessage({ type: "success", text: "身份已更新" });
+    await updateWorkerTier(id, payload);
+    setMessage({ type: "success", text: "模型等级已更新" });
     await loadData();
   };
 
-  const isModelEnabled = (provider: string, model: string) => {
-    const setting = modelSettings.find(
-      (s) => s.provider === provider && s.model === model,
-    );
-    return setting?.enabled ?? true;
-  };
-
-  const getIdentityForModel = (provider: string, model: string) => {
-    return (
-      identities.find((i) => i.provider === provider && i.model === model) ||
-      null
-    );
+  const handleDeleteTier = async (id: number) => {
+    try {
+      await deleteWorkerTier(id);
+      setMessage({ type: "success", text: "模型等级已删除" });
+      await loadData();
+    } catch (err) {
+      setMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "删除失败",
+      });
+    }
   };
 
   if (!showSettings) return null;
@@ -235,11 +243,14 @@ export function SettingsPanel() {
           {activeTab === "models" && (
             <ModelsTab
               piModels={piModels}
-              identities={identities}
-              modelSettings={modelSettings}
+              systemConfig={systemConfig}
+              workerTiers={workerTiers}
+              thinkingPolicies={thinkingPolicies}
               loading={loading}
-              onOpenSettings={openModal}
-              onToggleModel={handleToggleModel}
+              onUpdateCoordinator={handleUpdateCoordinator}
+              onOpenCreateModal={openCreateModal}
+              onOpenEditModal={openEditModal}
+              onDeleteTier={handleDeleteTier}
             />
           )}
 
@@ -247,19 +258,14 @@ export function SettingsPanel() {
         </div>
       </div>
 
-      <ModelSettingsModal
-        key={`${modalProvider}-${modalModel}`}
+      <WorkerTierModal
+        key={editingTier?.id ?? "new"}
         show={showModal}
-        provider={modalProvider}
-        model={modalModel}
-        modelEnabled={isModelEnabled(modalProvider, modalModel)}
-        identity={getIdentityForModel(modalProvider, modalModel)}
+        editingTier={editingTier}
+        piModels={piModels}
         onClose={closeModal}
-        onModelEnableChange={(enabled) =>
-          handleToggleModel(modalProvider, modalModel, enabled)
-        }
-        onSave={handleSaveIdentity}
-        onUpdate={handleUpdateIdentity}
+        onSave={handleSaveTier}
+        onUpdate={handleUpdateTier}
       />
     </div>
   );
