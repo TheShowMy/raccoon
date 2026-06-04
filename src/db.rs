@@ -1040,6 +1040,45 @@ async fn insert_job_message_with_metadata(
     Ok(())
 }
 
+/// 向已有 Job 追加用户消息，并在需要时将状态从 draft_ready 恢复为 analyzing
+pub async fn append_job_message(
+    pool: &Pool<Sqlite>,
+    job_id: i64,
+    content: &str,
+) -> Result<JobDetail> {
+    let job = get_job(pool, job_id).await?;
+
+    // 已归档或失败的 Job 不允许追加消息
+    if job.status == "archived" || job.status == "failed" {
+        anyhow::bail!("当前会话已结束，无法追加消息");
+    }
+
+    // 插入用户消息
+    insert_job_message(pool, job_id, "user", content).await?;
+
+    // 如果当前是 draft_ready，用户追加消息表示需求有变化，恢复为 analyzing
+    if job.status == "draft_ready" {
+        sqlx::query(
+            "UPDATE jobs
+             SET status = 'analyzing', current_stage = 'requirement_analysis', updated_at = datetime('now')
+             WHERE id = $1",
+        )
+        .bind(job_id)
+        .execute(pool)
+        .await?;
+
+        insert_job_message(
+            pool,
+            job_id,
+            "coordinator",
+            "收到补充说明，正在重新分析需求。",
+        )
+        .await?;
+    }
+
+    get_job_detail(pool, job_id).await
+}
+
 async fn insert_clarification_item(
     pool: &Pool<Sqlite>,
     job_id: i64,

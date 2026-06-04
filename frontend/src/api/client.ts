@@ -283,3 +283,15 @@ export async function confirmJob(jobId: number): Promise<JobDetail> {
   });
   return handleResponse<JobDetail>(res);
 }
+
+export async function appendJobMessage(
+  jobId: number,
+  content: string,
+): Promise<JobDetail> {
+  const res = await fetch(`/api/jobs/${jobId}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  return handleResponse<JobDetail>(res);
+}

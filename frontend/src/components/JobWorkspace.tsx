@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, Loader2, Send } from "lucide-react";
 import {
+  appendJobMessage,
   confirmJob,
   createJob,
   fetchJobDetail,
@@ -38,6 +39,7 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
   const [creating, setCreating] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [appending, setAppending] = useState(false);
   const [message, setMessage] = useState<MessageType | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const prevRoundRef = useRef<number>(0);
@@ -219,6 +221,31 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
     }
   };
 
+  const handleAppendMessage = async () => {
+    if (!selectedJob) return;
+    const trimmed = requirement.trim();
+    if (!trimmed) {
+      setMessage({ type: "error", text: "请先填写消息内容" });
+      return;
+    }
+
+    setAppending(true);
+    setMessage(null);
+    try {
+      const detail = await appendJobMessage(selectedJob.id, trimmed);
+      applyDetail(detail);
+      setRequirement("");
+      // 追加消息后不清除 streamMessages，因为 Coordinator 会继续分析
+    } catch (err) {
+      setMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "发送消息失败",
+      });
+    } finally {
+      setAppending(false);
+    }
+  };
+
   const updateAnswer = (
     clarificationId: number,
     updater: (answer: DraftAnswer) => DraftAnswer,
@@ -312,7 +339,8 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
 
   // 当前是否有活跃 job 正在处理
   const isProcessing = selectedJob?.status === "analyzing";
-  const inputDisabled = creating || isProcessing;
+  const canAppend = selectedJob && selectedJob.status !== "archived";
+  const inputDisabled = creating || appending || isProcessing;
 
   // 空状态：没有活跃 job
   const showEmptyState = activeJobs.length === 0 && !selectedJob;
@@ -429,15 +457,19 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
               onChange={(event) => setRequirement(event.target.value)}
               disabled={inputDisabled}
               rows={2}
-              placeholder="描述你的需求，Coordinator 会用聊天形式澄清并生成确认卡片..."
+              placeholder={
+                canAppend
+                  ? "补充说明你的需求，Coordinator 会继续分析..."
+                  : "描述你的需求，Coordinator 会用聊天形式澄清并生成确认卡片..."
+              }
               className="min-h-12 flex-1 resize-none rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-700 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-100 disabled:bg-slate-100 disabled:text-slate-400"
             />
             <button
-              onClick={handleCreateJob}
+              onClick={canAppend ? handleAppendMessage : handleCreateJob}
               disabled={inputDisabled || !requirement.trim()}
               className="flex w-24 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-slate-900 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {creating ? (
+              {creating || appending ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <Send className="h-4 w-4" />

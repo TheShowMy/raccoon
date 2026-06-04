@@ -161,6 +161,7 @@ fn create_router(
             post(submit_clarifications_handler),
         )
         .route("/api/jobs/:id/confirm", post(confirm_job_handler))
+        .route("/api/jobs/:id/messages", post(append_job_message_handler))
         .route("/api/projects/:id", delete(delete_project_handler))
         .route("/api/pi-config", get(pi_config_handler))
         .route("/api/pi-config/settings", post(update_pi_settings_handler))
@@ -307,6 +308,11 @@ struct SubmitClarificationsRequest {
     answers: Vec<db::SubmitClarificationAnswer>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AppendMessageRequest {
+    content: String,
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct ListJobsQuery {
@@ -426,6 +432,33 @@ async fn confirm_job_handler(
         Err(e) => {
             warn!("确认 Job 失败: {}", e);
             Json(ApiResponse::err(format!("确认失败: {}", e)))
+        }
+    }
+}
+
+async fn append_job_message_handler(
+    Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(pi_client): Extension<Arc<pi_rpc::PiRpcClient>>,
+    Extension(event_tx): Extension<EventSender>,
+    Path(job_id): Path<i64>,
+    axum::extract::Json(req): axum::extract::Json<AppendMessageRequest>,
+) -> Json<ApiResponse<db::JobDetail>> {
+    let content = req.content.trim();
+    if content.is_empty() {
+        return Json(ApiResponse::err("消息内容不能为空"));
+    }
+
+    match db::append_job_message(&pool, job_id, content).await {
+        Ok(detail) => {
+            // 如果状态恢复为 analyzing，触发 Coordinator 继续分析
+            if detail.job.status == "analyzing" {
+                spawn_followup_analysis(pool, pi_client, event_tx, job_id);
+            }
+            Json(ApiResponse::ok(detail))
+        }
+        Err(e) => {
+            warn!("追加消息失败: {}", e);
+            Json(ApiResponse::err(format!("发送失败: {}", e)))
         }
     }
 }
