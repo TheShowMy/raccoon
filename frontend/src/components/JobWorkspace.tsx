@@ -361,7 +361,7 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
             <span className="text-sm text-slate-400">加载会话...</span>
           </div>
         ) : (
-          <div className="space-y-4">
+          <div className="mx-auto w-full max-w-3xl space-y-4">
             {selectedJob && jobDetail && (
               <>
                 <MessageList
