@@ -353,62 +353,64 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
 
       {/* 中部滚动：消息列表 + 交互卡片 */}
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-        {showEmptyState ? (
-          <EmptyChat />
-        ) : loadingDetail && selectedJob ? (
-          <div className="flex h-full items-center justify-center">
-            <Loader2 className="mr-2 h-5 w-5 animate-spin text-amber-500" />
-            <span className="text-sm text-slate-400">加载会话...</span>
-          </div>
-        ) : (
-          <div className="mx-auto w-full max-w-3xl space-y-4">
-            {selectedJob && jobDetail && (
-              <>
-                <MessageList
-                  messages={jobDetail.messages}
-                  streamMessages={streamMessages}
-                  analyzing={selectedJob.status === "analyzing"}
-                />
-
-                {activeClarifications.length > 0 && (
-                  <ClarificationWizard
-                    key={`round-${jobDetail.job.clarificationRound}`}
-                    round={jobDetail.job.clarificationRound}
-                    clarifications={activeClarifications}
-                    answers={answers}
-                    submitting={submitting}
-                    onSubmit={handleSubmitAnswers}
-                    onSingleChoice={toggleSingleChoice}
-                    onMultiChoice={toggleMultiChoice}
-                    onFreeTextChange={(clarificationId, freeText) =>
-                      updateAnswer(clarificationId, (answer) => ({
-                        ...answer,
-                        freeText,
-                      }))
-                    }
-                    onCustomTextChange={(clarificationId, customText) =>
-                      updateAnswer(clarificationId, (answer) => ({
-                        ...answer,
-                        customText,
-                      }))
-                    }
+        <div className="mx-auto w-full max-w-3xl">
+          {showEmptyState ? (
+            <EmptyChat />
+          ) : loadingDetail && selectedJob ? (
+            <div className="flex h-full items-center justify-center">
+              <Loader2 className="mr-2 h-5 w-5 animate-spin text-amber-500" />
+              <span className="text-sm text-slate-400">加载会话...</span>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {selectedJob && jobDetail && (
+                <>
+                  <MessageList
+                    messages={jobDetail.messages}
+                    streamMessages={streamMessages}
+                    analyzing={selectedJob.status === "analyzing"}
                   />
-                )}
 
-                {taskDrafts.length > 0 &&
-                  selectedJob.status === "draft_ready" && (
-                    <ConfirmPanel
-                      taskDrafts={taskDrafts}
-                      confirming={confirming}
-                      onConfirm={handleConfirmDraft}
+                  {activeClarifications.length > 0 && (
+                    <ClarificationWizard
+                      key={`round-${jobDetail.job.clarificationRound}`}
+                      round={jobDetail.job.clarificationRound}
+                      clarifications={activeClarifications}
+                      answers={answers}
+                      submitting={submitting}
+                      onSubmit={handleSubmitAnswers}
+                      onSingleChoice={toggleSingleChoice}
+                      onMultiChoice={toggleMultiChoice}
+                      onFreeTextChange={(clarificationId, freeText) =>
+                        updateAnswer(clarificationId, (answer) => ({
+                          ...answer,
+                          freeText,
+                        }))
+                      }
+                      onCustomTextChange={(clarificationId, customText) =>
+                        updateAnswer(clarificationId, (answer) => ({
+                          ...answer,
+                          customText,
+                        }))
+                      }
                     />
                   )}
-              </>
-            )}
 
-            <div ref={scrollRef} />
-          </div>
-        )}
+                  {taskDrafts.length > 0 &&
+                    selectedJob.status === "draft_ready" && (
+                      <ConfirmPanel
+                        taskDrafts={taskDrafts}
+                        confirming={confirming}
+                        onConfirm={handleConfirmDraft}
+                      />
+                    )}
+                </>
+              )}
+
+              <div ref={scrollRef} />
+            </div>
+          )}
+        </div>
       </div>
 
       {/* 底部固定：输入框 */}
