@@ -340,14 +340,16 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
       {/* 顶部固定：Header + 分析进度 */}
       {selectedJob && jobDetail && (
         <div className="shrink-0 border-b border-slate-50 px-5 pt-3 pb-2">
-          <ChatHeader
-            job={selectedJob}
-            round={jobDetail.job.clarificationRound}
-          />
-          <AnalysisStepper
-            events={streamMessages}
-            isActive={selectedJob.status === "analyzing"}
-          />
+          <div className="mx-auto w-full max-w-3xl">
+            <ChatHeader
+              job={selectedJob}
+              round={jobDetail.job.clarificationRound}
+            />
+            <AnalysisStepper
+              events={streamMessages}
+              isActive={selectedJob.status === "analyzing"}
+            />
+          </div>
         </div>
       )}
 
@@ -415,32 +417,34 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
 
       {/* 底部固定：输入框 */}
       <div className="shrink-0 border-t border-slate-100 bg-white px-5 py-3">
-        {isProcessing && (
-          <p className="mb-1.5 text-xs text-slate-400">
-            Coordinator 正在分析当前需求，请稍候...
-          </p>
-        )}
-        <div className="flex gap-3">
-          <textarea
-            value={requirement}
-            onChange={(event) => setRequirement(event.target.value)}
-            disabled={inputDisabled}
-            rows={2}
-            placeholder="描述你的需求，Coordinator 会用聊天形式澄清并生成确认卡片..."
-            className="min-h-12 flex-1 resize-none rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-700 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-100 disabled:bg-slate-100 disabled:text-slate-400"
-          />
-          <button
-            onClick={handleCreateJob}
-            disabled={inputDisabled || !requirement.trim()}
-            className="flex w-24 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-slate-900 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {creating ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Send className="h-4 w-4" />
-            )}
-            发送
-          </button>
+        <div className="mx-auto w-full max-w-3xl">
+          {isProcessing && (
+            <p className="mb-1.5 text-xs text-slate-400">
+              Coordinator 正在分析当前需求，请稍候...
+            </p>
+          )}
+          <div className="flex gap-3">
+            <textarea
+              value={requirement}
+              onChange={(event) => setRequirement(event.target.value)}
+              disabled={inputDisabled}
+              rows={2}
+              placeholder="描述你的需求，Coordinator 会用聊天形式澄清并生成确认卡片..."
+              className="min-h-12 flex-1 resize-none rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-700 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-100 disabled:bg-slate-100 disabled:text-slate-400"
+            />
+            <button
+              onClick={handleCreateJob}
+              disabled={inputDisabled || !requirement.trim()}
+              className="flex w-24 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-slate-900 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {creating ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Send className="h-4 w-4" />
+              )}
+              发送
+            </button>
+          </div>
         </div>
       </div>
     </div>

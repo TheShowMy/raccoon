@@ -105,7 +105,7 @@ export function ProjectDetail({ project, onDelete }: ProjectDetailProps) {
       </div>
 
       <div className="min-h-0 flex-1 p-4">
-        <div className="h-full max-w-6xl">
+        <div className="mx-auto h-full max-w-6xl">
           {viewMode === "workspace" ? (
             <JobWorkspace projectId={project.id} />
           ) : (
