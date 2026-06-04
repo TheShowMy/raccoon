@@ -323,7 +323,20 @@ function ChoiceOption({
     >
       <ChoiceMark active={active} multi={multi} />
       <span className="min-w-0 flex-1">
-        <span className="block text-sm font-medium">{option.label}</span>
+        <span className="flex items-center justify-between gap-2">
+          <span className="block text-sm font-medium">{option.label}</span>
+          {option.recommended && (
+            <span
+              className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                active
+                  ? "bg-emerald-500/20 text-emerald-300"
+                  : "bg-emerald-50 text-emerald-600"
+              }`}
+            >
+              推荐
+            </span>
+          )}
+        </span>
         {option.description && (
           <span
             className={`mt-0.5 block text-xs leading-5 ${
@@ -331,15 +344,6 @@ function ChoiceOption({
             }`}
           >
             {option.description}
-          </span>
-        )}
-        {option.recommended && (
-          <span
-            className={`mt-1 inline-flex text-[10px] font-medium ${
-              active ? "text-slate-300" : "text-slate-400"
-            }`}
-          >
-            推荐
           </span>
         )}
       </span>
