@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+> **同步提示**：修改本文件时，请同步修改 [AGENTS.md](AGENTS.md)。
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## 项目

@@ -1,7 +1,5 @@
 # 🦝 raccoon
 
-> **同步提示**：修改本文件时，请同步修改 [AGENTS.md](AGENTS.md)。
-
 Rust 多 Agent 编排器，前后端分离架构。
 
 ## 技术栈
