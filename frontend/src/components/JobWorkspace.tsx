@@ -318,126 +318,129 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
   const showEmptyState = activeJobs.length === 0 && !selectedJob;
 
   return (
-    <div className="flex h-full overflow-hidden rounded-xl border border-slate-100 bg-white flex-col">
-      {/* 主对话区域 */}
-      <section className="flex min-w-0 flex-1 flex-col bg-white">
-        {message && (
-          <div
-            className={`mx-5 mt-4 flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm ${
-              message.type === "success"
-                ? "bg-emerald-50 text-emerald-700"
-                : "bg-rose-50 text-rose-700"
-            }`}
-          >
-            {message.type === "success" ? (
-              <CheckCircle2 className="h-4 w-4" />
-            ) : (
-              <AlertCircle className="h-4 w-4" />
-            )}
-            {message.text}
-          </div>
-        )}
-
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
-          {showEmptyState ? (
-            <EmptyChat />
-          ) : loadingDetail && selectedJob ? (
-            <div className="flex min-h-[420px] items-center justify-center">
-              <Loader2 className="mr-2 h-5 w-5 animate-spin text-amber-500" />
-              <span className="text-sm text-slate-400">加载会话...</span>
-            </div>
+    <div className="flex h-full flex-col overflow-hidden rounded-xl border border-slate-100 bg-white">
+      {/* 顶部固定：消息提示 */}
+      {message && (
+        <div
+          className={`flex shrink-0 items-center gap-2 px-5 py-2 text-sm ${
+            message.type === "success"
+              ? "bg-emerald-50 text-emerald-700"
+              : "bg-rose-50 text-rose-700"
+          }`}
+        >
+          {message.type === "success" ? (
+            <CheckCircle2 className="h-4 w-4" />
           ) : (
-            <div className="mx-auto max-w-3xl space-y-4">
-              {selectedJob && jobDetail && (
-                <>
-                  <ChatHeader
-                    job={selectedJob}
+            <AlertCircle className="h-4 w-4" />
+          )}
+          {message.text}
+        </div>
+      )}
+
+      {/* 顶部固定：Header + 分析进度 */}
+      {selectedJob && jobDetail && (
+        <div className="shrink-0 border-b border-slate-50 px-5 pt-3 pb-2">
+          <ChatHeader
+            job={selectedJob}
+            round={jobDetail.job.clarificationRound}
+          />
+          <AnalysisStepper
+            events={streamMessages}
+            isActive={selectedJob.status === "analyzing"}
+          />
+        </div>
+      )}
+
+      {/* 中部滚动：消息列表 + 交互卡片 */}
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        {showEmptyState ? (
+          <EmptyChat />
+        ) : loadingDetail && selectedJob ? (
+          <div className="flex h-full items-center justify-center">
+            <Loader2 className="mr-2 h-5 w-5 animate-spin text-amber-500" />
+            <span className="text-sm text-slate-400">加载会话...</span>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {selectedJob && jobDetail && (
+              <>
+                <MessageList
+                  messages={jobDetail.messages}
+                  streamMessages={streamMessages}
+                  analyzing={selectedJob.status === "analyzing"}
+                />
+
+                {activeClarifications.length > 0 && (
+                  <ClarificationWizard
+                    key={`round-${jobDetail.job.clarificationRound}`}
                     round={jobDetail.job.clarificationRound}
+                    clarifications={activeClarifications}
+                    answers={answers}
+                    submitting={submitting}
+                    onSubmit={handleSubmitAnswers}
+                    onSingleChoice={toggleSingleChoice}
+                    onMultiChoice={toggleMultiChoice}
+                    onFreeTextChange={(clarificationId, freeText) =>
+                      updateAnswer(clarificationId, (answer) => ({
+                        ...answer,
+                        freeText,
+                      }))
+                    }
+                    onCustomTextChange={(clarificationId, customText) =>
+                      updateAnswer(clarificationId, (answer) => ({
+                        ...answer,
+                        customText,
+                      }))
+                    }
                   />
+                )}
 
-                  <AnalysisStepper
-                    events={streamMessages}
-                    isActive={selectedJob.status === "analyzing"}
-                  />
-
-                  <MessageList
-                    messages={jobDetail.messages}
-                    streamMessages={streamMessages}
-                    analyzing={selectedJob.status === "analyzing"}
-                  />
-
-                  {activeClarifications.length > 0 && (
-                    <ClarificationWizard
-                      key={`round-${jobDetail.job.clarificationRound}`}
-                      round={jobDetail.job.clarificationRound}
-                      clarifications={activeClarifications}
-                      answers={answers}
-                      submitting={submitting}
-                      onSubmit={handleSubmitAnswers}
-                      onSingleChoice={toggleSingleChoice}
-                      onMultiChoice={toggleMultiChoice}
-                      onFreeTextChange={(clarificationId, freeText) =>
-                        updateAnswer(clarificationId, (answer) => ({
-                          ...answer,
-                          freeText,
-                        }))
-                      }
-                      onCustomTextChange={(clarificationId, customText) =>
-                        updateAnswer(clarificationId, (answer) => ({
-                          ...answer,
-                          customText,
-                        }))
-                      }
+                {taskDrafts.length > 0 &&
+                  selectedJob.status === "draft_ready" && (
+                    <ConfirmPanel
+                      taskDrafts={taskDrafts}
+                      confirming={confirming}
+                      onConfirm={handleConfirmDraft}
                     />
                   )}
+              </>
+            )}
 
-                  {taskDrafts.length > 0 &&
-                    selectedJob.status === "draft_ready" && (
-                      <ConfirmPanel
-                        taskDrafts={taskDrafts}
-                        confirming={confirming}
-                        onConfirm={handleConfirmDraft}
-                      />
-                    )}
-                </>
-              )}
-
-              <div ref={scrollRef} />
-            </div>
-          )}
-        </div>
-
-        {/* 始终可见的输入框 */}
-        <div className="border-t border-slate-100 bg-white px-5 py-4">
-          {isProcessing && (
-            <p className="mb-2 text-xs text-slate-400">
-              Coordinator 正在分析当前需求，请稍候...
-            </p>
-          )}
-          <div className="mx-auto flex max-w-3xl gap-3">
-            <textarea
-              value={requirement}
-              onChange={(event) => setRequirement(event.target.value)}
-              disabled={inputDisabled}
-              rows={2}
-              placeholder="描述你的需求，Coordinator 会用聊天形式澄清并生成确认卡片..."
-              className="min-h-12 flex-1 resize-none rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-700 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-100 disabled:bg-slate-100 disabled:text-slate-400"
-            />
-            <button
-              onClick={handleCreateJob}
-              disabled={inputDisabled || !requirement.trim()}
-              className="flex w-24 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-slate-900 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {creating ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Send className="h-4 w-4" />
-              )}
-              发送
-            </button>
+            <div ref={scrollRef} />
           </div>
+        )}
+      </div>
+
+      {/* 底部固定：输入框 */}
+      <div className="shrink-0 border-t border-slate-100 bg-white px-5 py-3">
+        {isProcessing && (
+          <p className="mb-1.5 text-xs text-slate-400">
+            Coordinator 正在分析当前需求，请稍候...
+          </p>
+        )}
+        <div className="flex gap-3">
+          <textarea
+            value={requirement}
+            onChange={(event) => setRequirement(event.target.value)}
+            disabled={inputDisabled}
+            rows={2}
+            placeholder="描述你的需求，Coordinator 会用聊天形式澄清并生成确认卡片..."
+            className="min-h-12 flex-1 resize-none rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-700 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-100 disabled:bg-slate-100 disabled:text-slate-400"
+          />
+          <button
+            onClick={handleCreateJob}
+            disabled={inputDisabled || !requirement.trim()}
+            className="flex w-24 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-slate-900 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {creating ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Send className="h-4 w-4" />
+            )}
+            发送
+          </button>
         </div>
-      </section>
+      </div>
     </div>
   );
 }

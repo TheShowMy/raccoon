@@ -32,10 +32,10 @@ interface ChatHeaderProps {
 
 export function ChatHeader({ job, round }: ChatHeaderProps) {
   return (
-    <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-4">
+    <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-2">
       <div className="min-w-0 flex-1">
-        <div className="mb-2 flex items-center gap-2 flex-wrap">
-          <h2 className="truncate text-lg font-bold text-slate-900">
+        <div className="flex items-center gap-2 flex-wrap">
+          <h2 className="truncate text-base font-bold text-slate-900">
             {getJobTitle(job)}
           </h2>
           <StatusBadge status={job.status} />
@@ -45,9 +45,6 @@ export function ChatHeader({ job, round }: ChatHeaderProps) {
             </span>
           )}
         </div>
-        <p className="text-xs text-slate-400">
-          创建于 {new Date(job.createdAt).toLocaleString()}
-        </p>
       </div>
     </div>
   );
