@@ -57,6 +57,10 @@ pub struct Job {
     pub original_requirement: String,
     pub status: String,
     pub current_stage: String,
+    pub coordinator_session_id: Option<String>,
+    pub coordinator_session_file: Option<String>,
+    pub clarification_round: i64,
+    pub archived_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -68,6 +72,7 @@ pub struct JobMessage {
     pub job_id: i64,
     pub role: String,
     pub content: String,
+    pub metadata_json: Option<String>,
     pub created_at: String,
 }
 
@@ -134,6 +139,13 @@ pub struct TaskDraft {
     pub acceptance_criteria: Vec<String>,
     pub status: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskDraftSeed {
+    pub title: String,
+    pub description: String,
+    pub acceptance_criteria: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -254,6 +266,10 @@ pub async fn init_db() -> Result<Pool<Sqlite>> {
             original_requirement TEXT NOT NULL,
             status TEXT NOT NULL,
             current_stage TEXT NOT NULL,
+            coordinator_session_id TEXT,
+            coordinator_session_file TEXT,
+            clarification_round INTEGER NOT NULL DEFAULT 0,
+            archived_at DATETIME,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -269,12 +285,15 @@ pub async fn init_db() -> Result<Pool<Sqlite>> {
             job_id INTEGER NOT NULL,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
+            metadata_json TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
         )",
     )
     .execute(&pool)
     .await?;
+
+    migrate_job_tables(&pool).await?;
 
     // Create clarification items table
     sqlx::query(
@@ -360,6 +379,47 @@ pub async fn init_db() -> Result<Pool<Sqlite>> {
     seed_task_thinking_policies(&pool).await?;
 
     Ok(pool)
+}
+
+async fn migrate_job_tables(pool: &Pool<Sqlite>) -> Result<()> {
+    add_column_if_missing(pool, "jobs", "coordinator_session_id", "TEXT").await?;
+    add_column_if_missing(pool, "jobs", "coordinator_session_file", "TEXT").await?;
+    add_column_if_missing(
+        pool,
+        "jobs",
+        "clarification_round",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    add_column_if_missing(pool, "jobs", "archived_at", "DATETIME").await?;
+    add_column_if_missing(pool, "job_messages", "metadata_json", "TEXT").await?;
+    sqlx::query(
+        "UPDATE jobs
+         SET status = 'archived',
+             current_stage = 'archived',
+             archived_at = COALESCE(archived_at, updated_at)
+         WHERE status = 'confirmed' AND archived_at IS NULL",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn add_column_if_missing(
+    pool: &Pool<Sqlite>,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let pragma = format!("SELECT name FROM pragma_table_info('{table}')");
+    let columns: Vec<(String,)> = sqlx::query_as(&pragma).fetch_all(pool).await?;
+    if columns.iter().any(|(name,)| name == column) {
+        return Ok(());
+    }
+
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+    sqlx::query(&sql).execute(pool).await?;
+    Ok(())
 }
 
 async fn seed_task_thinking_policies(pool: &Pool<Sqlite>) -> Result<()> {
@@ -513,6 +573,19 @@ pub async fn get_task_thinking_policies(pool: &Pool<Sqlite>) -> Result<Vec<TaskT
     Ok(policies)
 }
 
+pub async fn get_task_thinking_level(pool: &Pool<Sqlite>, task_type: &str) -> Result<String> {
+    let level = sqlx::query_scalar::<_, String>(
+        "SELECT default_level
+         FROM task_thinking_policies
+         WHERE task_type = $1",
+    )
+    .bind(task_type)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(level)
+}
+
 // ===== Project CRUD =====
 
 pub async fn get_projects(pool: &Pool<Sqlite>) -> Result<Vec<Project>> {
@@ -563,7 +636,7 @@ pub async fn project_exists(pool: &Pool<Sqlite>, project_id: i64) -> Result<bool
     Ok(count > 0)
 }
 
-pub async fn create_job_with_clarifications(
+pub async fn create_analyzing_job(
     pool: &Pool<Sqlite>,
     project_id: i64,
     original_requirement: &str,
@@ -575,7 +648,7 @@ pub async fn create_job_with_clarifications(
     let title = derive_job_title(original_requirement);
     let job_id = sqlx::query(
         "INSERT INTO jobs (project_id, title, original_requirement, status, current_stage)
-         VALUES ($1, $2, $3, 'clarifying', 'clarification')",
+         VALUES ($1, $2, $3, 'analyzing', 'requirement_analysis')",
     )
     .bind(project_id)
     .bind(&title)
@@ -589,11 +662,49 @@ pub async fn create_job_with_clarifications(
         pool,
         job_id,
         "coordinator",
-        "我先确认几个关键选择，再整理可执行任务草案。",
+        "我正在分析需求，判断是否需要进一步澄清。",
     )
     .await?;
 
-    for item in default_clarification_items() {
+    get_job_detail(pool, job_id).await
+}
+
+pub async fn set_job_coordinator_session(
+    pool: &Pool<Sqlite>,
+    job_id: i64,
+    session_id: Option<&str>,
+    session_file: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE jobs
+         SET coordinator_session_id = $1, coordinator_session_file = $2, updated_at = datetime('now')
+         WHERE id = $3",
+    )
+    .bind(session_id)
+    .bind(session_file)
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn apply_clarification_items(
+    pool: &Pool<Sqlite>,
+    job_id: i64,
+    progress: &str,
+    clarifications: Vec<ClarificationSeed>,
+    fallback_reason: Option<&str>,
+) -> Result<JobDetail> {
+    if clarifications.is_empty() {
+        anyhow::bail!("至少需要一个澄清项");
+    }
+
+    sqlx::query("DELETE FROM clarification_items WHERE job_id = $1 AND answer_json IS NULL")
+        .bind(job_id)
+        .execute(pool)
+        .await?;
+
+    for item in clarifications {
         insert_clarification_item(
             pool,
             job_id,
@@ -605,20 +716,102 @@ pub async fn create_job_with_clarifications(
         .await?;
     }
 
+    sqlx::query(
+        "UPDATE jobs
+         SET status = 'clarifying',
+             current_stage = 'clarification',
+             clarification_round = clarification_round + 1,
+             updated_at = datetime('now')
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+
+    insert_job_message(
+        pool,
+        job_id,
+        "coordinator",
+        if progress.trim().is_empty() {
+            "我需要再确认几个关键点。"
+        } else {
+            progress.trim()
+        },
+    )
+    .await?;
+
+    if let Some(reason) = fallback_reason {
+        insert_job_message(
+            pool,
+            job_id,
+            "system",
+            &format!("Coordinator 生成澄清失败，已使用模板澄清。原因：{reason}"),
+        )
+        .await?;
+    }
+
     get_job_detail(pool, job_id).await
 }
 
-pub async fn get_project_jobs(pool: &Pool<Sqlite>, project_id: i64) -> Result<Vec<Job>> {
-    let jobs = sqlx::query_as::<_, Job>(
+pub async fn apply_task_draft(
+    pool: &Pool<Sqlite>,
+    job_id: i64,
+    progress: &str,
+    draft: TaskDraftSeed,
+) -> Result<JobDetail> {
+    sqlx::query("DELETE FROM task_drafts WHERE job_id = $1")
+        .bind(job_id)
+        .execute(pool)
+        .await?;
+
+    insert_task_draft(pool, job_id, draft).await?;
+
+    sqlx::query(
+        "UPDATE jobs
+         SET status = 'draft_ready', current_stage = 'task_draft', updated_at = datetime('now')
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+
+    insert_job_message(
+        pool,
+        job_id,
+        "coordinator",
+        if progress.trim().is_empty() {
+            "需求已经足够清晰，我已整理确认卡片。"
+        } else {
+            progress.trim()
+        },
+    )
+    .await?;
+
+    get_job_detail(pool, job_id).await
+}
+
+pub async fn get_project_jobs(
+    pool: &Pool<Sqlite>,
+    project_id: i64,
+    include_archived: bool,
+) -> Result<Vec<Job>> {
+    let archived_filter = if include_archived {
+        ""
+    } else {
+        "AND archived_at IS NULL"
+    };
+    let sql = format!(
         "SELECT id, project_id, title, original_requirement, status, current_stage,
+                coordinator_session_id, coordinator_session_file, clarification_round, archived_at,
                 created_at, updated_at
          FROM jobs
-         WHERE project_id = $1
-         ORDER BY updated_at DESC, id DESC",
-    )
-    .bind(project_id)
-    .fetch_all(pool)
-    .await?;
+         WHERE project_id = $1 {archived_filter}
+         ORDER BY updated_at DESC, id DESC"
+    );
+    let jobs = sqlx::query_as::<_, Job>(&sql)
+        .bind(project_id)
+        .fetch_all(pool)
+        .await?;
 
     Ok(jobs)
 }
@@ -682,13 +875,13 @@ pub async fn submit_clarification_answers(
         .await?;
     }
 
-    insert_job_message(pool, job_id, "user", "已提交澄清答案。").await?;
+    let summary = summarize_answers(pool, job_id, answers).await?;
+    insert_job_message(pool, job_id, "user", &summary).await?;
 
     if all_clarifications_answered(pool, job_id).await? {
-        ensure_task_drafts(pool, job_id).await?;
         sqlx::query(
             "UPDATE jobs
-             SET status = 'draft_ready', current_stage = 'task_draft', updated_at = datetime('now')
+             SET status = 'analyzing', current_stage = 'requirement_analysis', updated_at = datetime('now')
              WHERE id = $1",
         )
         .bind(job_id)
@@ -698,7 +891,7 @@ pub async fn submit_clarification_answers(
             pool,
             job_id,
             "coordinator",
-            "已根据澄清答案整理任务草案，请确认后进入待执行。",
+            "我已收到澄清答案，正在继续判断是否可以确认需求。",
         )
         .await?;
     } else {
@@ -719,20 +912,17 @@ pub async fn confirm_job(pool: &Pool<Sqlite>, job_id: i64) -> Result<JobDetail> 
 
     sqlx::query(
         "UPDATE jobs
-         SET status = 'confirmed', current_stage = 'pending_execution', updated_at = datetime('now')
+         SET status = 'archived',
+             current_stage = 'archived',
+             archived_at = datetime('now'),
+             updated_at = datetime('now')
          WHERE id = $1",
     )
     .bind(job_id)
     .execute(pool)
     .await?;
 
-    insert_job_message(
-        pool,
-        job_id,
-        "system",
-        "任务草案已确认，等待后续执行链路接入。",
-    )
-    .await?;
+    insert_job_message(pool, job_id, "system", "需求已确认，当前澄清会话已归档。").await?;
 
     get_job_detail(pool, job_id).await
 }
@@ -740,6 +930,7 @@ pub async fn confirm_job(pool: &Pool<Sqlite>, job_id: i64) -> Result<JobDetail> 
 async fn get_job(pool: &Pool<Sqlite>, job_id: i64) -> Result<Job> {
     let job = sqlx::query_as::<_, Job>(
         "SELECT id, project_id, title, original_requirement, status, current_stage,
+                coordinator_session_id, coordinator_session_file, clarification_round, archived_at,
                 created_at, updated_at
          FROM jobs WHERE id = $1",
     )
@@ -752,7 +943,7 @@ async fn get_job(pool: &Pool<Sqlite>, job_id: i64) -> Result<Job> {
 
 async fn get_job_messages(pool: &Pool<Sqlite>, job_id: i64) -> Result<Vec<JobMessage>> {
     let messages = sqlx::query_as::<_, JobMessage>(
-        "SELECT id, job_id, role, content, created_at
+        "SELECT id, job_id, role, content, metadata_json, created_at
          FROM job_messages
          WHERE job_id = $1
          ORDER BY id ASC",
@@ -802,12 +993,27 @@ async fn insert_job_message(
     role: &str,
     content: &str,
 ) -> Result<()> {
-    sqlx::query("INSERT INTO job_messages (job_id, role, content) VALUES ($1, $2, $3)")
-        .bind(job_id)
-        .bind(role)
-        .bind(content)
-        .execute(pool)
-        .await?;
+    insert_job_message_with_metadata(pool, job_id, role, content, None).await
+}
+
+async fn insert_job_message_with_metadata(
+    pool: &Pool<Sqlite>,
+    job_id: i64,
+    role: &str,
+    content: &str,
+    metadata: Option<&serde_json::Value>,
+) -> Result<()> {
+    let metadata_json = metadata.map(serde_json::to_string).transpose()?;
+    sqlx::query(
+        "INSERT INTO job_messages (job_id, role, content, metadata_json)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(job_id)
+    .bind(role)
+    .bind(content)
+    .bind(metadata_json)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -847,6 +1053,38 @@ async fn all_clarifications_answered(pool: &Pool<Sqlite>, job_id: i64) -> Result
     Ok(unanswered == 0)
 }
 
+async fn summarize_answers(
+    pool: &Pool<Sqlite>,
+    job_id: i64,
+    answers: &[SubmitClarificationAnswer],
+) -> Result<String> {
+    let items = get_clarification_items(pool, job_id).await?;
+    let mut lines = vec!["已提交澄清答案：".to_string()];
+    for answer in answers {
+        if let Some(item) = items.iter().find(|item| item.id == answer.clarification_id) {
+            let mut parts = answer.selected_options.clone();
+            if let Some(custom_text) = answer
+                .custom_text
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            {
+                parts.push(custom_text.to_string());
+            }
+            lines.push(format!(
+                "- {}：{}",
+                item.question,
+                if parts.is_empty() {
+                    "已确认".to_string()
+                } else {
+                    parts.join("、")
+                }
+            ));
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
 async fn ensure_task_drafts(pool: &Pool<Sqlite>, job_id: i64) -> Result<()> {
     let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_drafts WHERE job_id = $1")
         .bind(job_id)
@@ -883,20 +1121,37 @@ async fn ensure_task_drafts(pool: &Pool<Sqlite>, job_id: i64) -> Result<()> {
     ];
 
     for (title, description, acceptance_criteria) in drafts {
-        let criteria_json = serde_json::to_string(&acceptance_criteria)?;
-        sqlx::query(
-            "INSERT INTO task_drafts
-                (job_id, title, description, acceptance_criteria_json, status)
-             VALUES ($1, $2, $3, $4, 'draft')",
+        insert_task_draft(
+            pool,
+            job_id,
+            TaskDraftSeed {
+                title: title.to_string(),
+                description: description.to_string(),
+                acceptance_criteria: acceptance_criteria
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            },
         )
-        .bind(job_id)
-        .bind(title)
-        .bind(description)
-        .bind(criteria_json)
-        .execute(pool)
         .await?;
     }
 
+    Ok(())
+}
+
+async fn insert_task_draft(pool: &Pool<Sqlite>, job_id: i64, draft: TaskDraftSeed) -> Result<()> {
+    let criteria_json = serde_json::to_string(&draft.acceptance_criteria)?;
+    sqlx::query(
+        "INSERT INTO task_drafts
+            (job_id, title, description, acceptance_criteria_json, status)
+         VALUES ($1, $2, $3, $4, 'draft')",
+    )
+    .bind(job_id)
+    .bind(draft.title)
+    .bind(draft.description)
+    .bind(criteria_json)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -925,49 +1180,15 @@ fn derive_job_title(requirement: &str) -> String {
     }
 }
 
-struct ClarificationSeed {
-    question: String,
-    question_type: String,
-    options: Vec<ClarificationOption>,
-    allow_custom: bool,
+#[derive(Debug, Clone)]
+pub struct ClarificationSeed {
+    pub question: String,
+    pub question_type: String,
+    pub options: Vec<ClarificationOption>,
+    pub allow_custom: bool,
 }
 
-fn default_clarification_items() -> Vec<ClarificationSeed> {
-    vec![
-        ClarificationSeed {
-            question: "这次需求的主要交付目标是什么？".to_string(),
-            question_type: "single_choice".to_string(),
-            options: vec![
-                option("直接修改代码", "确认后直接进入实现任务草案。", true),
-                option("先产出技术方案", "优先整理设计、风险和拆分方案。", false),
-                option("只做代码审查", "以问题发现和修改建议为主。", false),
-            ],
-            allow_custom: true,
-        },
-        ClarificationSeed {
-            question: "你希望这次验收包含哪些检查？".to_string(),
-            question_type: "multi_choice".to_string(),
-            options: vec![
-                option("自动化测试", "运行现有单元测试或检查命令。", true),
-                option("前端手工验证", "打开页面验证核心交互。", false),
-                option(
-                    "构建检查",
-                    "运行 cargo check、前端 build 或全量 check。",
-                    true,
-                ),
-            ],
-            allow_custom: true,
-        },
-        ClarificationSeed {
-            question: "还有哪些必须包含或排除的范围？".to_string(),
-            question_type: "free_text".to_string(),
-            options: Vec::new(),
-            allow_custom: true,
-        },
-    ]
-}
-
-fn option(label: &str, description: &str, recommended: bool) -> ClarificationOption {
+fn _test_option(label: &str, description: &str, recommended: bool) -> ClarificationOption {
     ClarificationOption {
         label: label.to_string(),
         description: description.to_string(),
@@ -1031,7 +1252,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn job_clarification_flow_generates_and_confirms_task_drafts() {
+    async fn chat_clarification_flow_generates_and_archives_requirement() {
         let pool = memory_pool().await;
         update_system_config(&pool, "test-provider", "test-model")
             .await
@@ -1040,9 +1261,46 @@ mod tests {
             .await
             .unwrap();
 
-        let detail = create_job_with_clarifications(&pool, project.id, "实现需求澄清闭环")
+        let detail = create_analyzing_job(&pool, project.id, "实现需求澄清闭环")
             .await
             .unwrap();
+        assert_eq!(detail.job.status, "analyzing");
+        assert!(detail.clarifications.is_empty());
+
+        let detail = apply_clarification_items(
+            &pool,
+            detail.job.id,
+            "还需要确认几个关键点。",
+            vec![
+                ClarificationSeed {
+                    question: "交付目标是什么？".to_string(),
+                    question_type: "single_choice".to_string(),
+                    options: vec![
+                        _test_option("直接修改代码", "确认后直接进入实现。", true),
+                        _test_option("先出方案", "优先整理设计文档。", false),
+                    ],
+                    allow_custom: true,
+                },
+                ClarificationSeed {
+                    question: "验收包含哪些检查？".to_string(),
+                    question_type: "multi_choice".to_string(),
+                    options: vec![
+                        _test_option("自动化测试", "运行单元测试。", true),
+                        _test_option("构建检查", "运行 cargo check。", false),
+                    ],
+                    allow_custom: true,
+                },
+                ClarificationSeed {
+                    question: "必须排除的范围？".to_string(),
+                    question_type: "free_text".to_string(),
+                    options: Vec::new(),
+                    allow_custom: true,
+                },
+            ],
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(detail.job.status, "clarifying");
         assert_eq!(detail.clarifications.len(), 3);
         assert!(detail.task_drafts.is_empty());
@@ -1068,26 +1326,49 @@ mod tests {
         let detail = submit_clarification_answers(&pool, detail.job.id, &answers)
             .await
             .unwrap();
-        assert_eq!(detail.job.status, "draft_ready");
-        assert_eq!(detail.task_drafts.len(), 3);
+        assert_eq!(detail.job.status, "analyzing");
         assert!(detail
             .clarifications
             .iter()
             .all(|item| item.answer.is_some()));
 
+        let detail = apply_task_draft(
+            &pool,
+            detail.job.id,
+            "需求已经清晰，可以确认。",
+            TaskDraftSeed {
+                title: "实现需求澄清闭环".to_string(),
+                description: "以聊天形式完成需求澄清并展示确认卡片。".to_string(),
+                acceptance_criteria: vec![
+                    "支持可点选澄清项".to_string(),
+                    "确认后归档会话".to_string(),
+                ],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(detail.job.status, "draft_ready");
+        assert_eq!(detail.task_drafts.len(), 1);
+
         let detail = confirm_job(&pool, detail.job.id).await.unwrap();
-        assert_eq!(detail.job.status, "confirmed");
-        assert_eq!(detail.job.current_stage, "pending_execution");
+        assert_eq!(detail.job.status, "archived");
+        assert_eq!(detail.job.current_stage, "archived");
+        assert!(detail.job.archived_at.is_some());
         assert!(detail
             .task_drafts
             .iter()
             .all(|draft| draft.status == "confirmed"));
+
+        let active_jobs = get_project_jobs(&pool, project.id, false).await.unwrap();
+        assert!(active_jobs.is_empty());
+        let all_jobs = get_project_jobs(&pool, project.id, true).await.unwrap();
+        assert_eq!(all_jobs.len(), 1);
     }
 
     #[tokio::test]
     async fn create_job_rejects_unknown_project() {
         let pool = memory_pool().await;
-        let err = create_job_with_clarifications(&pool, 404, "不存在项目")
+        let err = create_analyzing_job(&pool, 404, "不存在项目")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("项目不存在"));

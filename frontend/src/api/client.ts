@@ -161,7 +161,13 @@ export async function fetchThinkingPolicies(): Promise<TaskThinkingPolicy[]> {
 
 // ===== Job / Clarification API =====
 
-export type JobStatus = "clarifying" | "draft_ready" | "confirmed" | string;
+export type JobStatus =
+  | "analyzing"
+  | "clarifying"
+  | "draft_ready"
+  | "archived"
+  | "failed"
+  | string;
 
 export interface Job {
   id: number;
@@ -170,6 +176,10 @@ export interface Job {
   originalRequirement: string;
   status: JobStatus;
   currentStage: string;
+  coordinatorSessionId?: string | null;
+  coordinatorSessionFile?: string | null;
+  clarificationRound: number;
+  archivedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -179,6 +189,7 @@ export interface JobMessage {
   jobId: number;
   role: "user" | "coordinator" | "system" | string;
   content: string;
+  metadataJson?: string;
   createdAt: string;
 }
 
@@ -228,8 +239,12 @@ export interface SubmitClarificationAnswer {
   customText?: string;
 }
 
-export async function fetchProjectJobs(projectId: number): Promise<Job[]> {
-  const res = await fetch(`/api/projects/${projectId}/jobs`);
+export async function fetchProjectJobs(
+  projectId: number,
+  includeArchived = false,
+): Promise<Job[]> {
+  const params = includeArchived ? "?includeArchived=true" : "";
+  const res = await fetch(`/api/projects/${projectId}/jobs${params}`);
   return handleResponse<Job[]>(res);
 }
 

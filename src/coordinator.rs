@@ -1,0 +1,715 @@
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use tracing::warn;
+
+use crate::db::{ClarificationOption, ClarificationSeed, SystemConfig, TaskDraftSeed};
+use crate::pi_rpc::{PiRpcClient, RpcSessionState};
+
+const GENERATION_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(60);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoordinatorStatus {
+    NeedsClarification,
+    Ready,
+}
+
+#[derive(Debug, Clone)]
+pub struct CoordinatorDecision {
+    pub status: CoordinatorStatus,
+    pub progress: String,
+    pub clarifications: Vec<ClarificationSeed>,
+    pub draft: Option<TaskDraftSeed>,
+    pub session: RpcSessionState,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawCoordinatorResponse {
+    status: String,
+    #[serde(default)]
+    progress: String,
+    #[serde(default)]
+    clarifications: Vec<GeneratedClarification>,
+    draft: Option<GeneratedDraft>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedClarification {
+    question: String,
+    #[serde(rename = "type")]
+    question_type: String,
+    #[serde(default)]
+    options: Vec<GeneratedOption>,
+    #[serde(default = "default_allow_custom")]
+    allow_custom: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedOption {
+    label: String,
+    description: String,
+    #[serde(default)]
+    recommended: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedDraft {
+    title: String,
+    summary: String,
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
+}
+
+fn default_allow_custom() -> bool {
+    true
+}
+
+pub async fn start_requirement_analysis(
+    pi_client: &PiRpcClient,
+    system_config: &SystemConfig,
+    thinking_level: &str,
+    requirement: &str,
+    title: &str,
+) -> Result<CoordinatorDecision> {
+    let _guard = pi_client.session_guard().await;
+    let created = pi_client
+        .new_session()
+        .await
+        .context("创建 Coordinator 独立会话失败")?;
+    if created.cancelled {
+        anyhow::bail!("创建 Coordinator 独立会话被取消");
+    }
+    pi_client
+        .set_session_name(&format!("raccoon: {title}"))
+        .await
+        .context("设置 Coordinator 会话名称失败")?;
+    run_prompt(
+        pi_client,
+        system_config,
+        thinking_level,
+        &build_initial_prompt(requirement),
+    )
+    .await
+}
+
+pub async fn continue_requirement_analysis(
+    pi_client: &PiRpcClient,
+    system_config: &SystemConfig,
+    thinking_level: &str,
+    session_file: &str,
+    answer_summary: &str,
+) -> Result<CoordinatorDecision> {
+    let _guard = pi_client.session_guard().await;
+    let switched = pi_client
+        .switch_session(session_file)
+        .await
+        .context("切回 Coordinator 会话失败")?;
+    if switched.cancelled {
+        anyhow::bail!("切回 Coordinator 会话被取消");
+    }
+    run_prompt(
+        pi_client,
+        system_config,
+        thinking_level,
+        &build_followup_prompt(answer_summary),
+    )
+    .await
+}
+
+async fn run_prompt(
+    pi_client: &PiRpcClient,
+    system_config: &SystemConfig,
+    thinking_level: &str,
+    prompt: &str,
+) -> Result<CoordinatorDecision> {
+    pi_client
+        .set_model(
+            &system_config.coordinator_provider,
+            &system_config.coordinator_model,
+        )
+        .await
+        .context("设置 Coordinator 模型失败")?;
+    pi_client
+        .set_thinking_level(thinking_level)
+        .await
+        .context("设置 Coordinator thinking level 失败")?;
+
+    pi_client
+        .prompt(prompt)
+        .await
+        .context("发送 Coordinator prompt 失败")?;
+    pi_client
+        .wait_for_agent_end(GENERATION_TIMEOUT)
+        .await
+        .context("等待 Coordinator 输出失败")?;
+
+    let mut decision = try_parse_with_retry(pi_client, prompt).await?;
+    let session = pi_client
+        .get_state()
+        .await
+        .context("读取 Coordinator 会话状态失败")?;
+    decision.session = session;
+    Ok(decision)
+}
+
+/// 尝试解析 Coordinator 输出。
+///
+/// 优先级：
+/// 1. 如果 LLM 调用了 submit_coordinator_decision 工具，从 tool result 直接读取（格式最可靠）
+/// 2. 否则从 assistant 文本解析 JSON
+/// 3. 文本解析失败时通过 steer 给一次自纠机会
+async fn try_parse_with_retry(
+    pi_client: &PiRpcClient,
+    _original_prompt: &str,
+) -> Result<CoordinatorDecision> {
+    // 1. 优先尝试从 tool result 读取
+    if let Some(decision) = try_parse_from_tool_result(pi_client).await? {
+        return Ok(decision);
+    }
+
+    // 2. Fallback 到文本解析
+    let text = pi_client
+        .get_last_assistant_text()
+        .await
+        .context("读取 Coordinator 输出失败")?
+        .context("Coordinator 未返回文本")?;
+
+    match parse_decision(&text) {
+        Ok(decision) => Ok(decision),
+        Err(e) => {
+            warn!("Coordinator 首次解析失败，尝试 steer 自纠: {}", e);
+
+            pi_client
+                .steer(
+                    "你的输出格式不正确。请严格只输出一个 JSON 对象，不要 Markdown 代码块，不要解释文字。请参考我最初给你的格式示例重新输出。",
+                )
+                .await
+                .context("发送 steer 自纠指令失败")?;
+
+            pi_client
+                .wait_for_agent_end(GENERATION_TIMEOUT)
+                .await
+                .context("等待 Coordinator 自纠输出失败")?;
+
+            // 自纠后也优先检查 tool result
+            if let Some(decision) = try_parse_from_tool_result(pi_client).await? {
+                return Ok(decision);
+            }
+
+            let text = pi_client
+                .get_last_assistant_text()
+                .await
+                .context("读取 Coordinator 自纠输出失败")?
+                .context("Coordinator 自纠未返回文本")?;
+
+            parse_decision(&text).context("Coordinator 自纠后仍无法解析输出")
+        }
+    }
+}
+
+/// 从会话消息中查找 submit_coordinator_decision 的 tool result。
+async fn try_parse_from_tool_result(
+    pi_client: &PiRpcClient,
+) -> Result<Option<CoordinatorDecision>> {
+    let messages = pi_client.get_messages().await.context("获取会话消息失败")?;
+
+    // 从后往前找最近的 toolResult
+    for msg in messages.iter().rev() {
+        if msg.role == "toolResult"
+            && msg.tool_name.as_deref() == Some("submit_coordinator_decision")
+        {
+            if let Some(details) = &msg.details {
+                let response: RawCoordinatorResponse = serde_json::from_value(details.clone())
+                    .context("解析 tool result details 失败")?;
+                return Ok(Some(normalize_decision(response)?));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn build_initial_prompt(requirement: &str) -> String {
+    format!(
+        r#"你是 raccoon 的 Coordinator，负责把用户需求整理为后续执行前的确认需求。
+
+如果你看到 submit_coordinator_decision 工具可用，请优先调用该工具提交你的分析决策。
+如果工具不可用，请只输出一个 JSON 对象，不要 Markdown，不要解释，不要代码块。
+你必须先判断需求是否已经足够清晰：
+- 如果目标、范围、验收方式已经足够明确，返回 status=ready，并生成 draft。
+- 如果仍有会影响实现路径或验收的关键不确定点，返回 status=needs_clarification，并生成 1 到 6 个澄清问题。
+
+JSON 结构必须是：
+{{
+  "status": "needs_clarification | ready",
+  "progress": "给用户看的简短过程说明，说明你正在判断什么",
+  "clarifications": [
+    {{
+      "question": "问题文本",
+      "type": "single_choice | multi_choice | free_text",
+      "options": [
+        {{
+          "label": "短选项",
+          "description": "选择该项的影响或取舍",
+          "recommended": true
+        }}
+      ],
+      "allowCustom": true
+    }}
+  ],
+  "draft": {{
+    "title": "确认需求标题",
+    "summary": "最终需求范围摘要",
+    "acceptanceCriteria": ["验收标准 1", "验收标准 2"]
+  }}
+}}
+
+规则：
+- needs_clarification 时 clarifications 必须包含 1 到 6 个问题，draft 可以省略。
+- ready 时 clarifications 必须为空数组，draft 必须存在。
+- single_choice 和 multi_choice 必须提供 2 到 4 个选项。
+- free_text 可以没有 options。
+- 每个选择题最多一个 recommended=true。
+- 不要询问已经能从需求中明确得到的信息。
+- progress 只写可展示给用户的过程摘要，不输出隐藏思考链。
+
+示例输出（needs_clarification）：
+{{
+  "status": "needs_clarification",
+  "progress": "需求目标已识别，但技术栈偏好和验收标准需要确认。",
+  "clarifications": [
+    {{
+      "question": "倾向使用哪种前端框架？",
+      "type": "single_choice",
+      "options": [
+        {{
+          "label": "React",
+          "description": "生态系统最丰富，适合复杂交互场景",
+          "recommended": true
+        }},
+        {{
+          "label": "Vue",
+          "description": "上手简单，模板语法直观"
+        }}
+      ],
+      "allowCustom": true
+    }}
+  ]
+}}
+
+用户需求：
+{requirement}
+"#
+    )
+}
+
+fn build_followup_prompt(answer_summary: &str) -> String {
+    format!(
+        r#"用户已经回答了上一轮澄清问题：
+{answer_summary}
+
+请基于当前完整上下文继续判断：
+- 如果仍有关键不确定点，返回 status=needs_clarification，并给出 1 到 6 个新的澄清问题。
+- 如果需求已经足够清楚，返回 status=ready，并生成 draft。
+
+只输出符合前一轮约定的 JSON 对象，不要 Markdown，不要解释，不要代码块。
+
+示例输出（ready）：
+{{
+  "status": "ready",
+  "progress": "需求已明确：使用 React 开发，需通过自动化测试和构建检查验收。",
+  "clarifications": [],
+  "draft": {{
+    "title": "实现用户登录功能",
+    "summary": "开发包含邮箱验证码登录和 JWT Token 鉴权的登录模块，支持登录状态持久化。",
+    "acceptanceCriteria": [
+      "邮箱验证码发送和校验流程正常工作",
+      "JWT Token 签发和刷新机制正确",
+      "登录状态在页面刷新后保持"
+    ]
+  }}
+}}
+"#
+    )
+}
+
+pub fn parse_decision(text: &str) -> Result<CoordinatorDecision> {
+    let json_text = extract_json_object(text).context("Coordinator 输出中没有 JSON 对象")?;
+    let response: RawCoordinatorResponse =
+        serde_json::from_str(&json_text).context("解析 Coordinator JSON 失败")?;
+    normalize_decision(response)
+}
+
+fn normalize_decision(response: RawCoordinatorResponse) -> Result<CoordinatorDecision> {
+    let progress = response.progress.trim().to_string();
+    match response.status.as_str() {
+        "needs_clarification" => {
+            let clarifications = normalize_clarifications(response.clarifications)?;
+            Ok(CoordinatorDecision {
+                status: CoordinatorStatus::NeedsClarification,
+                progress,
+                clarifications,
+                draft: None,
+                session: empty_session(),
+            })
+        }
+        "ready" => {
+            if !response.clarifications.is_empty() {
+                anyhow::bail!("ready 状态不能包含澄清项");
+            }
+            let draft = response.draft.context("ready 状态必须包含 draft")?;
+            Ok(CoordinatorDecision {
+                status: CoordinatorStatus::Ready,
+                progress,
+                clarifications: Vec::new(),
+                draft: Some(normalize_draft(draft)?),
+                session: empty_session(),
+            })
+        }
+        other => anyhow::bail!("不支持的 Coordinator 状态: {other}"),
+    }
+}
+
+fn normalize_clarifications(items: Vec<GeneratedClarification>) -> Result<Vec<ClarificationSeed>> {
+    if items.is_empty() {
+        anyhow::bail!("needs_clarification 状态必须包含澄清项");
+    }
+    if items.len() > 6 {
+        anyhow::bail!("Coordinator 返回的澄清项过多");
+    }
+
+    let mut seeds = Vec::with_capacity(items.len());
+    for item in items {
+        let question = item.question.trim().to_string();
+        if question.is_empty() {
+            anyhow::bail!("澄清问题不能为空");
+        }
+        if !matches!(
+            item.question_type.as_str(),
+            "single_choice" | "multi_choice" | "free_text"
+        ) {
+            anyhow::bail!("不支持的澄清问题类型: {}", item.question_type);
+        }
+
+        let options = item
+            .options
+            .into_iter()
+            .map(|option| ClarificationOption {
+                label: option.label.trim().to_string(),
+                description: option.description.trim().to_string(),
+                recommended: option.recommended,
+            })
+            .collect::<Vec<_>>();
+
+        if item.question_type == "free_text" {
+            seeds.push(ClarificationSeed {
+                question,
+                question_type: item.question_type,
+                options: Vec::new(),
+                allow_custom: true,
+            });
+            continue;
+        }
+
+        if options.len() < 2 || options.len() > 4 {
+            anyhow::bail!("选择题必须包含 2 到 4 个选项");
+        }
+        if options
+            .iter()
+            .any(|option| option.label.is_empty() || option.description.is_empty())
+        {
+            anyhow::bail!("澄清选项 label/description 不能为空");
+        }
+        if options.iter().filter(|option| option.recommended).count() > 1 {
+            anyhow::bail!("每个选择题最多只能有一个推荐选项");
+        }
+
+        seeds.push(ClarificationSeed {
+            question,
+            question_type: item.question_type,
+            options,
+            allow_custom: item.allow_custom,
+        });
+    }
+
+    Ok(seeds)
+}
+
+fn normalize_draft(draft: GeneratedDraft) -> Result<TaskDraftSeed> {
+    let title = draft.title.trim().to_string();
+    let description = draft.summary.trim().to_string();
+    let acceptance_criteria = draft
+        .acceptance_criteria
+        .into_iter()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>();
+
+    if title.is_empty() {
+        anyhow::bail!("draft.title 不能为空");
+    }
+    if description.is_empty() {
+        anyhow::bail!("draft.summary 不能为空");
+    }
+    if acceptance_criteria.is_empty() {
+        anyhow::bail!("draft.acceptanceCriteria 不能为空");
+    }
+
+    Ok(TaskDraftSeed {
+        title,
+        description,
+        acceptance_criteria,
+    })
+}
+
+fn extract_json_object(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+
+    // 1. 尝试提取 Markdown 代码块中的 JSON
+    if let Some(json) = extract_markdown_json(trimmed) {
+        return Some(json);
+    }
+
+    // 2. 用栈匹配找最外层配对的 {}
+    let (start, end) = find_balanced_braces(trimmed)?;
+    let fragment = trimmed[start..=end].trim();
+
+    // 3. 尝试修复常见 JSON 错误
+    Some(sanitize_json_fragment(fragment))
+}
+
+/// 从 Markdown 代码块中提取 JSON 内容
+fn extract_markdown_json(text: &str) -> Option<String> {
+    let markers = ["```json\n", "```json ", "```\n", "``` "];
+    for marker in &markers {
+        if let Some(start_idx) = text.find(marker) {
+            let after_marker = &text[start_idx + marker.len()..];
+            if let Some(end_idx) = after_marker.find("```") {
+                let content = after_marker[..end_idx].trim();
+                if content.starts_with('{') {
+                    return Some(content.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 用栈匹配算法找第一个 { 及其配对的 }
+fn find_balanced_braces(text: &str) -> Option<(usize, usize)> {
+    let mut start: Option<usize> = None;
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for (i, ch) in text.char_indices() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_string => escape_next = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => {
+                if start.is_none() {
+                    start = Some(i);
+                }
+                depth += 1;
+            }
+            '}' if !in_string => {
+                if depth > 0 {
+                    depth -= 1;
+                    if depth == 0 {
+                        if let Some(s) = start {
+                            return Some((s, i));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 修复常见的 JSON 语法错误
+fn sanitize_json_fragment(text: &str) -> String {
+    let mut result = text.to_string();
+
+    // 去除对象和数组中的尾部逗号
+    // 先处理嵌套情况，从长到短避免重复替换问题
+    result = result.replace(",\n}", "\n}");
+    result = result.replace(",\n]", "\n]");
+    result = result.replace(",}", "}");
+    result = result.replace(",]", "]");
+
+    result
+}
+
+fn empty_session() -> RpcSessionState {
+    RpcSessionState {
+        session_file: None,
+        session_id: String::new(),
+        is_streaming: false,
+        pending_message_count: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ready_decision_without_clarifications() {
+        let parsed = parse_decision(
+            r#"{
+  "status": "ready",
+  "progress": "需求已经清晰，可以确认。",
+  "clarifications": [],
+  "draft": {
+    "title": "实现聊天式澄清",
+    "summary": "将需求澄清改为聊天体验。",
+    "acceptanceCriteria": ["展示聊天流", "确认后归档"]
+  }
+}"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.status, CoordinatorStatus::Ready);
+        assert!(parsed.clarifications.is_empty());
+        assert_eq!(parsed.draft.unwrap().acceptance_criteria.len(), 2);
+    }
+
+    #[test]
+    fn parse_needs_clarification_decision() {
+        let parsed = parse_decision(
+            r#"```json
+{
+  "status": "needs_clarification",
+  "progress": "还需要确认验收方式。",
+  "clarifications": [
+    {
+      "question": "验收方式？",
+      "type": "multi_choice",
+      "options": [
+        {"label": "测试", "description": "运行自动化测试", "recommended": true},
+        {"label": "构建", "description": "运行构建检查"}
+      ],
+      "allowCustom": true
+    }
+  ]
+}
+```"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.status, CoordinatorStatus::NeedsClarification);
+        assert_eq!(parsed.clarifications.len(), 1);
+    }
+
+    #[test]
+    fn reject_ready_with_clarifications() {
+        let err = parse_decision(
+            r#"{
+  "status": "ready",
+  "clarifications": [
+    {"question": "目标？", "type": "free_text"}
+  ],
+  "draft": {
+    "title": "标题",
+    "summary": "摘要",
+    "acceptanceCriteria": ["通过"]
+  }
+}"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("ready 状态不能包含"));
+    }
+
+    // ---- extract_json_object 测试 ----
+
+    #[test]
+    fn extracts_plain_json() {
+        let text = r#"{"status": "ready", "progress": "ok"}"#;
+        assert_eq!(
+            extract_json_object(text),
+            Some(r#"{"status": "ready", "progress": "ok"}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_json_from_markdown_json_block() {
+        let text = "```json\n{\"status\": \"ready\"}\n```";
+        assert_eq!(
+            extract_json_object(text),
+            Some(r#"{"status": "ready"}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_json_from_markdown_plain_block() {
+        let text = "```\n{\"status\": \"ready\"}\n```";
+        assert_eq!(
+            extract_json_object(text),
+            Some(r#"{"status": "ready"}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_json_with_explanatory_text() {
+        let text = r#"这是分析结果：
+{"status": "ready", "progress": "ok"}
+请确认。"#;
+        assert_eq!(
+            extract_json_object(text),
+            Some(r#"{"status": "ready", "progress": "ok"}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_nested_json() {
+        let text = r#"{"outer": {"inner": "value"}}"#;
+        assert_eq!(
+            extract_json_object(text),
+            Some(r#"{"outer": {"inner": "value"}}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn fixes_trailing_comma_in_object() {
+        let text = r#"{"status": "ready", "progress": "ok",}"#;
+        assert_eq!(
+            extract_json_object(text),
+            Some(r#"{"status": "ready", "progress": "ok"}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn fixes_trailing_comma_in_array() {
+        let text = r#"{"items": [1, 2, 3,]}"#;
+        assert_eq!(
+            extract_json_object(text),
+            Some(r#"{"items": [1, 2, 3]}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn returns_none_when_no_json() {
+        assert_eq!(extract_json_object("只是一些普通文本"), None);
+    }
+
+    #[test]
+    fn handles_multiple_json_objects() {
+        let text = r#"{"first": 1}{"status": "ready"}"#;
+        // 应该提取第一个最外层的 JSON
+        assert_eq!(
+            extract_json_object(text),
+            Some(r#"{"first": 1}"#.to_string())
+        );
+    }
+}

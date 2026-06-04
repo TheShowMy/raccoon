@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use axum::{
-    extract::{Extension, Path},
-    response::Json,
+    extract::{Extension, Path, Query},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        Json,
+    },
     routing::{delete, get, post, put},
     Router,
 };
@@ -9,16 +12,31 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{Pool, Sqlite};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::process::Command;
+use tokio::sync::broadcast;
+use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
 
+mod coordinator;
 mod db;
 mod pi_rpc;
 
 const PORT: u16 = 3003;
+
+type EventSender = broadcast::Sender<JobEvent>;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobEvent {
+    job_id: i64,
+    event: String,
+    message: String,
+}
 
 /// 获取可执行文件所在目录
 fn exe_dir() -> Option<PathBuf> {
@@ -90,10 +108,17 @@ async fn main() -> Result<()> {
         }
     };
 
-    let pi_client = match pi_rpc::PiRpcClient::new().await {
+    let pi_session_dir = db_dir.join("pi-sessions");
+    let extension_path = std::path::Path::new("pi-extensions/coordinator-decision.ts");
+    let pi_client = match pi_rpc::PiRpcClient::new_with_extension(
+        &pi_session_dir,
+        extension_path.exists().then_some(extension_path),
+    )
+    .await
+    {
         Ok(c) => {
             info!("Pi RPC 客户端初始化成功");
-            std::sync::Arc::new(c)
+            Arc::new(c)
         }
         Err(e) => {
             warn!("Pi RPC 客户端初始化失败: {}", e);
@@ -101,7 +126,8 @@ async fn main() -> Result<()> {
         }
     };
 
-    let app = create_router(pool, pi_client);
+    let (event_tx, _) = broadcast::channel(256);
+    let app = create_router(pool, pi_client, event_tx);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], PORT));
     info!("🦝 raccoon 服务启动于 http://{}", addr);
@@ -112,7 +138,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn create_router(pool: Pool<Sqlite>, pi_client: std::sync::Arc<pi_rpc::PiRpcClient>) -> Router {
+fn create_router(
+    pool: Pool<Sqlite>,
+    pi_client: Arc<pi_rpc::PiRpcClient>,
+    event_tx: EventSender,
+) -> Router {
     let api_routes = Router::new()
         .route("/api/health", get(health_handler))
         .route("/api/pi-status", get(pi_status_handler))
@@ -125,6 +155,7 @@ fn create_router(pool: Pool<Sqlite>, pi_client: std::sync::Arc<pi_rpc::PiRpcClie
             get(list_project_jobs_handler).post(create_job_handler),
         )
         .route("/api/jobs/:id", get(get_job_handler))
+        .route("/api/jobs/:id/events", get(job_events_handler))
         .route(
             "/api/jobs/:id/clarifications",
             post(submit_clarifications_handler),
@@ -156,7 +187,8 @@ fn create_router(pool: Pool<Sqlite>, pi_client: std::sync::Arc<pi_rpc::PiRpcClie
             get(list_thinking_policies_handler),
         )
         .layer(Extension(pool))
-        .layer(Extension(pi_client));
+        .layer(Extension(pi_client))
+        .layer(Extension(event_tx));
 
     let frontend_router = if let Some(dir) = find_frontend_dir() {
         info!("前端静态文件目录: {}", dir.display());
@@ -275,11 +307,19 @@ struct SubmitClarificationsRequest {
     answers: Vec<db::SubmitClarificationAnswer>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ListJobsQuery {
+    #[serde(default)]
+    include_archived: bool,
+}
+
 async fn list_project_jobs_handler(
     Extension(pool): Extension<Pool<Sqlite>>,
     Path(project_id): Path<i64>,
+    Query(query): Query<ListJobsQuery>,
 ) -> Json<ApiResponse<Vec<db::Job>>> {
-    match db::get_project_jobs(&pool, project_id).await {
+    match db::get_project_jobs(&pool, project_id, query.include_archived).await {
         Ok(jobs) => Json(ApiResponse::ok(jobs)),
         Err(e) => {
             warn!("获取 Job 列表失败: {}", e);
@@ -290,6 +330,8 @@ async fn list_project_jobs_handler(
 
 async fn create_job_handler(
     Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(pi_client): Extension<Arc<pi_rpc::PiRpcClient>>,
+    Extension(event_tx): Extension<EventSender>,
     Path(project_id): Path<i64>,
     axum::extract::Json(req): axum::extract::Json<CreateJobRequest>,
 ) -> Json<ApiResponse<db::JobDetail>> {
@@ -316,8 +358,20 @@ async fn create_job_handler(
         ));
     }
 
-    match db::create_job_with_clarifications(&pool, project_id, requirement).await {
-        Ok(detail) => Json(ApiResponse::ok(detail)),
+    match db::create_analyzing_job(&pool, project_id, requirement).await {
+        Ok(detail) => {
+            let job_id = detail.job.id;
+            spawn_initial_analysis(
+                pool.clone(),
+                pi_client,
+                event_tx,
+                system_config,
+                job_id,
+                detail.job.title.clone(),
+                requirement.to_string(),
+            );
+            Json(ApiResponse::ok(detail))
+        }
         Err(e) => {
             warn!("创建 Job 失败: {}", e);
             Json(ApiResponse::err(format!("创建失败: {}", e)))
@@ -340,11 +394,18 @@ async fn get_job_handler(
 
 async fn submit_clarifications_handler(
     Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(pi_client): Extension<Arc<pi_rpc::PiRpcClient>>,
+    Extension(event_tx): Extension<EventSender>,
     Path(job_id): Path<i64>,
     axum::extract::Json(req): axum::extract::Json<SubmitClarificationsRequest>,
 ) -> Json<ApiResponse<db::JobDetail>> {
     match db::submit_clarification_answers(&pool, job_id, &req.answers).await {
-        Ok(detail) => Json(ApiResponse::ok(detail)),
+        Ok(detail) => {
+            if detail.job.status == "analyzing" {
+                spawn_followup_analysis(pool.clone(), pi_client, event_tx, job_id);
+            }
+            Json(ApiResponse::ok(detail))
+        }
         Err(e) => {
             warn!("提交澄清答案失败: {}", e);
             Json(ApiResponse::err(format!("提交失败: {}", e)))
@@ -354,15 +415,239 @@ async fn submit_clarifications_handler(
 
 async fn confirm_job_handler(
     Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(event_tx): Extension<EventSender>,
     Path(job_id): Path<i64>,
 ) -> Json<ApiResponse<db::JobDetail>> {
     match db::confirm_job(&pool, job_id).await {
-        Ok(detail) => Json(ApiResponse::ok(detail)),
+        Ok(detail) => {
+            emit_job_event(&event_tx, job_id, "archived", "需求已确认，会话已归档。");
+            Json(ApiResponse::ok(detail))
+        }
         Err(e) => {
             warn!("确认 Job 失败: {}", e);
             Json(ApiResponse::err(format!("确认失败: {}", e)))
         }
     }
+}
+
+async fn job_events_handler(
+    Extension(event_tx): Extension<EventSender>,
+    Path(job_id): Path<i64>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let stream = BroadcastStream::new(event_tx.subscribe()).filter_map(move |item| match item {
+        Ok(event) if event.job_id == job_id => serde_json::to_string(&event)
+            .ok()
+            .map(|data| Ok(Event::default().event(event.event).data(data))),
+        _ => None,
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn spawn_initial_analysis(
+    pool: Pool<Sqlite>,
+    pi_client: Arc<pi_rpc::PiRpcClient>,
+    event_tx: EventSender,
+    system_config: db::SystemConfig,
+    job_id: i64,
+    title: String,
+    requirement: String,
+) {
+    tokio::spawn(async move {
+        emit_job_event(
+            &event_tx,
+            job_id,
+            "coordinator_started",
+            "Coordinator 正在分析需求。",
+        );
+        if let Err(e) = run_initial_analysis(
+            &pool,
+            &pi_client,
+            &event_tx,
+            system_config,
+            job_id,
+            &title,
+            &requirement,
+        )
+        .await
+        {
+            warn!("Coordinator 初始分析失败: {}", e);
+            emit_job_event(
+                &event_tx,
+                job_id,
+                "error",
+                &format!("Coordinator 分析失败: {}", e),
+            );
+        }
+    });
+}
+
+fn spawn_followup_analysis(
+    pool: Pool<Sqlite>,
+    pi_client: Arc<pi_rpc::PiRpcClient>,
+    event_tx: EventSender,
+    job_id: i64,
+) {
+    tokio::spawn(async move {
+        emit_job_event(
+            &event_tx,
+            job_id,
+            "coordinator_started",
+            "Coordinator 正在继续分析澄清答案。",
+        );
+        if let Err(e) = run_followup_analysis(&pool, &pi_client, &event_tx, job_id).await {
+            warn!("Coordinator 后续分析失败: {}", e);
+            emit_job_event(
+                &event_tx,
+                job_id,
+                "error",
+                &format!("Coordinator 分析失败: {}", e),
+            );
+        }
+    });
+}
+
+async fn run_initial_analysis(
+    pool: &Pool<Sqlite>,
+    pi_client: &pi_rpc::PiRpcClient,
+    event_tx: &EventSender,
+    system_config: db::SystemConfig,
+    job_id: i64,
+    title: &str,
+    requirement: &str,
+) -> Result<()> {
+    let thinking_level = get_requirement_thinking_level(pool).await;
+    let decision = coordinator::start_requirement_analysis(
+        pi_client,
+        &system_config,
+        &thinking_level,
+        requirement,
+        title,
+    )
+    .await?;
+
+    db::set_job_coordinator_session(
+        pool,
+        job_id,
+        Some(&decision.session.session_id),
+        decision.session.session_file.as_deref(),
+    )
+    .await?;
+    apply_coordinator_decision(pool, event_tx, job_id, decision).await
+}
+
+async fn run_followup_analysis(
+    pool: &Pool<Sqlite>,
+    pi_client: &pi_rpc::PiRpcClient,
+    event_tx: &EventSender,
+    job_id: i64,
+) -> Result<()> {
+    let detail = db::get_job_detail(pool, job_id).await?;
+    if detail.job.clarification_round >= 5 {
+        let draft = db::TaskDraftSeed {
+            title: detail.job.title.clone(),
+            description: "已达到最大澄清轮数，先按当前已确认信息整理需求。".to_string(),
+            acceptance_criteria: vec![
+                "实现范围遵循原始需求和已提交澄清答案".to_string(),
+                "不确定事项按最小可行范围处理".to_string(),
+                "交付时说明剩余风险和验证结果".to_string(),
+            ],
+        };
+        db::apply_task_draft(
+            pool,
+            job_id,
+            "已达到最大澄清轮数，我先整理确认需求卡片。",
+            draft,
+        )
+        .await?;
+        emit_job_event(event_tx, job_id, "task_draft_ready", "确认需求卡片已生成。");
+        return Ok(());
+    }
+
+    let session_file = detail
+        .job
+        .coordinator_session_file
+        .as_deref()
+        .context("当前 Job 缺少 Coordinator 会话文件")?;
+    let answer_summary = detail
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .map(|message| message.content.as_str())
+        .unwrap_or("用户已提交澄清答案。");
+    let system_config = db::get_system_config(pool).await?;
+    let thinking_level = get_requirement_thinking_level(pool).await;
+    let decision = coordinator::continue_requirement_analysis(
+        pi_client,
+        &system_config,
+        &thinking_level,
+        session_file,
+        answer_summary,
+    )
+    .await?;
+
+    apply_coordinator_decision(pool, event_tx, job_id, decision).await
+}
+
+async fn apply_coordinator_decision(
+    pool: &Pool<Sqlite>,
+    event_tx: &EventSender,
+    job_id: i64,
+    decision: coordinator::CoordinatorDecision,
+) -> Result<()> {
+    if !decision.progress.trim().is_empty() {
+        emit_job_event(
+            event_tx,
+            job_id,
+            "coordinator_progress",
+            decision.progress.trim(),
+        );
+    }
+
+    match decision.status {
+        coordinator::CoordinatorStatus::NeedsClarification => {
+            db::apply_clarification_items(
+                pool,
+                job_id,
+                &decision.progress,
+                decision.clarifications,
+                None,
+            )
+            .await?;
+            emit_job_event(
+                event_tx,
+                job_id,
+                "clarifications_ready",
+                "新的澄清问题已生成。",
+            );
+        }
+        coordinator::CoordinatorStatus::Ready => {
+            let draft = decision.draft.context("ready 状态缺少任务草案")?;
+            db::apply_task_draft(pool, job_id, &decision.progress, draft).await?;
+            emit_job_event(event_tx, job_id, "task_draft_ready", "确认需求卡片已生成。");
+        }
+    }
+
+    Ok(())
+}
+
+async fn get_requirement_thinking_level(pool: &Pool<Sqlite>) -> String {
+    match db::get_task_thinking_level(pool, "requirement_analysis").await {
+        Ok(level) => level,
+        Err(e) => {
+            warn!("读取需求分析 thinking level 失败，使用 high: {}", e);
+            "high".to_string()
+        }
+    }
+}
+
+fn emit_job_event(event_tx: &EventSender, job_id: i64, event: &str, message: &str) {
+    let _ = event_tx.send(JobEvent {
+        job_id,
+        event: event.to_string(),
+        message: message.to_string(),
+    });
 }
 
 // ===== Pi Config API =====
