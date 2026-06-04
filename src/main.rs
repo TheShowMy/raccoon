@@ -471,12 +471,17 @@ fn spawn_initial_analysis(
         )
         .await
         {
-            warn!("Coordinator 初始分析失败: {}", e);
+            let err_msg = format!("{}", e);
+            warn!("Coordinator 初始分析失败: {}", err_msg);
+            // 更新数据库状态为 failed，避免前端无限等待
+            if let Err(db_err) = db::set_job_failed(&pool, job_id, &err_msg).await {
+                warn!("标记 job 为 failed 失败: {}", db_err);
+            }
             emit_job_event(
                 &event_tx,
                 job_id,
                 "error",
-                &format!("Coordinator 分析失败: {}", e),
+                &format!("Coordinator 分析失败: {}", err_msg),
             );
         }
     });
@@ -496,12 +501,17 @@ fn spawn_followup_analysis(
             "Coordinator 正在继续分析澄清答案。",
         );
         if let Err(e) = run_followup_analysis(&pool, &pi_client, &event_tx, job_id).await {
-            warn!("Coordinator 后续分析失败: {}", e);
+            let err_msg = format!("{}", e);
+            warn!("Coordinator 后续分析失败: {}", err_msg);
+            // 更新数据库状态为 failed，避免前端无限等待
+            if let Err(db_err) = db::set_job_failed(&pool, job_id, &err_msg).await {
+                warn!("标记 job 为 failed 失败: {}", db_err);
+            }
             emit_job_event(
                 &event_tx,
                 job_id,
                 "error",
-                &format!("Coordinator 分析失败: {}", e),
+                &format!("Coordinator 分析失败: {}", err_msg),
             );
         }
     });

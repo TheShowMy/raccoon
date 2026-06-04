@@ -160,17 +160,16 @@ async fn run_prompt(
 /// 优先级：
 /// 1. 如果 LLM 调用了 submit_coordinator_decision 工具，从 tool result 直接读取（格式最可靠）
 /// 2. 否则从 assistant 文本解析 JSON
-/// 3. 文本解析失败时通过 steer 给一次自纠机会
+/// 3. 解析失败时通过 steer 给具体错误反馈，最多自纠 2 次
 async fn try_parse_with_retry(
     pi_client: &PiRpcClient,
     _original_prompt: &str,
 ) -> Result<CoordinatorDecision> {
-    // 1. 优先尝试从 tool result 读取
+    // 第 0 次：初始尝试
     if let Some(decision) = try_parse_from_tool_result(pi_client).await? {
         return Ok(decision);
     }
 
-    // 2. Fallback 到文本解析
     let text = pi_client
         .get_last_assistant_text()
         .await
@@ -179,22 +178,24 @@ async fn try_parse_with_retry(
 
     match parse_decision(&text) {
         Ok(decision) => Ok(decision),
-        Err(e) => {
-            warn!("Coordinator 首次解析失败，尝试 steer 自纠: {}", e);
+        Err(initial_err) => {
+            warn!("Coordinator 首次解析失败: {}", initial_err);
 
+            // 第 1 次自纠：给出具体错误
+            let steer_msg = format!(
+                "你的输出有问题：{}。请修正后严格只输出一个 JSON 对象，不要 Markdown 代码块，不要解释文字。",
+                initial_err
+            );
             pi_client
-                .steer(
-                    "你的输出格式不正确。请严格只输出一个 JSON 对象，不要 Markdown 代码块，不要解释文字。请参考我最初给你的格式示例重新输出。",
-                )
+                .steer(&steer_msg)
                 .await
-                .context("发送 steer 自纠指令失败")?;
+                .context("发送第 1 次 steer 自纠指令失败")?;
 
             pi_client
                 .wait_for_agent_end(GENERATION_TIMEOUT)
                 .await
-                .context("等待 Coordinator 自纠输出失败")?;
+                .context("等待 Coordinator 第 1 次自纠输出失败")?;
 
-            // 自纠后也优先检查 tool result
             if let Some(decision) = try_parse_from_tool_result(pi_client).await? {
                 return Ok(decision);
             }
@@ -202,10 +203,42 @@ async fn try_parse_with_retry(
             let text = pi_client
                 .get_last_assistant_text()
                 .await
-                .context("读取 Coordinator 自纠输出失败")?
-                .context("Coordinator 自纠未返回文本")?;
+                .context("读取 Coordinator 第 1 次自纠输出失败")?
+                .context("Coordinator 第 1 次自纠未返回文本")?;
 
-            parse_decision(&text).context("Coordinator 自纠后仍无法解析输出")
+            match parse_decision(&text) {
+                Ok(decision) => Ok(decision),
+                Err(first_retry_err) => {
+                    warn!("Coordinator 第 1 次自纠后仍解析失败: {}", first_retry_err);
+
+                    // 第 2 次自纠
+                    let steer_msg = format!(
+                        "修正后仍有问题：{}。请再次修正，严格只输出符合格式的 JSON，不要任何其他内容。",
+                        first_retry_err
+                    );
+                    pi_client
+                        .steer(&steer_msg)
+                        .await
+                        .context("发送第 2 次 steer 自纠指令失败")?;
+
+                    pi_client
+                        .wait_for_agent_end(GENERATION_TIMEOUT)
+                        .await
+                        .context("等待 Coordinator 第 2 次自纠输出失败")?;
+
+                    if let Some(decision) = try_parse_from_tool_result(pi_client).await? {
+                        return Ok(decision);
+                    }
+
+                    let text = pi_client
+                        .get_last_assistant_text()
+                        .await
+                        .context("读取 Coordinator 第 2 次自纠输出失败")?
+                        .context("Coordinator 第 2 次自纠未返回文本")?;
+
+                    parse_decision(&text).context("Coordinator 两次自纠后仍无法解析输出")
+                }
+            }
         }
     }
 }
@@ -236,13 +269,16 @@ fn build_initial_prompt(requirement: &str) -> String {
     format!(
         r#"你是 raccoon 的 Coordinator，负责把用户需求整理为后续执行前的确认需求。
 
-如果你看到 submit_coordinator_decision 工具可用，请优先调用该工具提交你的分析决策。
-如果工具不可用，请只输出一个 JSON 对象，不要 Markdown，不要解释，不要代码块。
+如果你看到 submit_coordinator_decision 工具可用，请**优先调用该工具**提交你的分析决策。
+如果工具不可用，请**只输出一个 JSON 对象**，不要 Markdown，不要解释，不要代码块。
+
 你必须先判断需求是否已经足够清晰：
 - 如果目标、范围、验收方式已经足够明确，返回 status=ready，并生成 draft。
 - 如果仍有会影响实现路径或验收的关键不确定点，返回 status=needs_clarification，并生成 1 到 6 个澄清问题。
 
-JSON 结构必须是：
+## 输出 JSON 结构
+
+```json
 {{
   "status": "needs_clarification | ready",
   "progress": "给用户看的简短过程说明，说明你正在判断什么",
@@ -266,17 +302,21 @@ JSON 结构必须是：
     "acceptanceCriteria": ["验收标准 1", "验收标准 2"]
   }}
 }}
+```
 
-规则：
-- needs_clarification 时 clarifications 必须包含 1 到 6 个问题，draft 可以省略。
-- ready 时 clarifications 必须为空数组，draft 必须存在。
-- single_choice 和 multi_choice 必须提供 2 到 4 个选项。
-- free_text 可以没有 options。
-- 每个选择题最多一个 recommended=true。
-- 不要询问已经能从需求中明确得到的信息。
-- progress 只写可展示给用户的过程摘要，不输出隐藏思考链。
+## ⚠️ 关键规则（必须严格遵守，否则输出会被拒绝）
 
-示例输出（needs_clarification）：
+1. **status=needs_clarification 时**：clarifications 必须包含 1 到 6 个问题，draft 可以省略。
+2. **status=ready 时**：clarifications 必须为空数组 `[]`，draft 必须存在。
+3. **single_choice / multi_choice 必须提供 2 到 4 个选项** —— 绝对不能少于 2 个，也绝对不能多于 4 个。
+4. **free_text 可以没有 options**（options 为空数组）。
+5. **每个选择题最多只能有 1 个 recommended=true** —— 绝对不能标记 2 个或以上为 recommended。
+6. 不要询问已经能从需求中明确得到的信息。
+7. progress 只写可展示给用户的过程摘要，不输出隐藏思考链。
+
+## 示例输出（needs_clarification）
+
+```json
 {{
   "status": "needs_clarification",
   "progress": "需求目标已识别，但技术栈偏好和验收标准需要确认。",
@@ -299,8 +339,10 @@ JSON 结构必须是：
     }}
   ]
 }}
+```
 
-用户需求：
+## 用户需求
+
 {requirement}
 "#
     )
@@ -315,9 +357,49 @@ fn build_followup_prompt(answer_summary: &str) -> String {
 - 如果仍有关键不确定点，返回 status=needs_clarification，并给出 1 到 6 个新的澄清问题。
 - 如果需求已经足够清楚，返回 status=ready，并生成 draft。
 
-只输出符合前一轮约定的 JSON 对象，不要 Markdown，不要解释，不要代码块。
+如果你看到 submit_coordinator_decision 工具可用，请**优先调用该工具**提交你的分析决策。
+如果工具不可用，请**只输出一个 JSON 对象**，不要 Markdown，不要解释，不要代码块。
 
-示例输出（ready）：
+## 输出 JSON 结构（与初始分析相同）
+
+```json
+{{
+  "status": "needs_clarification | ready",
+  "progress": "给用户看的简短过程说明",
+  "clarifications": [
+    {{
+      "question": "问题文本",
+      "type": "single_choice | multi_choice | free_text",
+      "options": [
+        {{
+          "label": "短选项",
+          "description": "选择该项的影响或取舍",
+          "recommended": true
+        }}
+      ],
+      "allowCustom": true
+    }}
+  ],
+  "draft": {{
+    "title": "确认需求标题",
+    "summary": "最终需求范围摘要",
+    "acceptanceCriteria": ["验收标准 1", "验收标准 2"]
+  }}
+}}
+```
+
+## ⚠️ 关键规则（必须严格遵守）
+
+1. **status=needs_clarification 时**：clarifications 必须包含 1 到 6 个问题，draft 可以省略。
+2. **status=ready 时**：clarifications 必须为空数组 `[]`，draft 必须存在。
+3. **single_choice / multi_choice 必须提供 2 到 4 个选项** —— 绝对不能少于 2 个，也绝对不能多于 4 个。
+4. **free_text 可以没有 options**（options 为空数组）。
+5. **每个选择题最多只能有 1 个 recommended=true** —— 绝对不能标记 2 个或以上为 recommended。
+6. progress 只写可展示给用户的过程摘要。
+
+## 示例输出（ready）
+
+```json
 {{
   "status": "ready",
   "progress": "需求已明确：使用 React 开发，需通过自动化测试和构建检查验收。",
@@ -332,6 +414,34 @@ fn build_followup_prompt(answer_summary: &str) -> String {
     ]
   }}
 }}
+```
+
+## 示例输出（needs_clarification）
+
+```json
+{{
+  "status": "needs_clarification",
+  "progress": "已确认前端框架，但部署方式和验收标准需要补充。",
+  "clarifications": [
+    {{
+      "question": "部署目标环境是什么？",
+      "type": "single_choice",
+      "options": [
+        {{
+          "label": "Vercel",
+          "description": "Serverless 部署，自动 CI/CD",
+          "recommended": true
+        }},
+        {{
+          "label": "自有服务器",
+          "description": "Docker 部署，完全可控"
+        }}
+      ],
+      "allowCustom": true
+    }}
+  ]
+}}
+```
 "#
     )
 }
@@ -394,7 +504,7 @@ fn normalize_clarifications(items: Vec<GeneratedClarification>) -> Result<Vec<Cl
             anyhow::bail!("不支持的澄清问题类型: {}", item.question_type);
         }
 
-        let options = item
+        let mut options: Vec<ClarificationOption> = item
             .options
             .into_iter()
             .map(|option| ClarificationOption {
@@ -402,7 +512,7 @@ fn normalize_clarifications(items: Vec<GeneratedClarification>) -> Result<Vec<Cl
                 description: option.description.trim().to_string(),
                 recommended: option.recommended,
             })
-            .collect::<Vec<_>>();
+            .collect();
 
         if item.question_type == "free_text" {
             seeds.push(ClarificationSeed {
@@ -414,8 +524,59 @@ fn normalize_clarifications(items: Vec<GeneratedClarification>) -> Result<Vec<Cl
             continue;
         }
 
+        // 自动修复：推荐选项去重
+        let recommended_count = options.iter().filter(|o| o.recommended).count();
+        if recommended_count > 1 {
+            warn!(
+                "Coordinator 生成了 {} 个推荐选项，自动保留第一个",
+                recommended_count
+            );
+            let mut first_kept = false;
+            for option in options.iter_mut() {
+                if option.recommended {
+                    if first_kept {
+                        option.recommended = false;
+                    } else {
+                        first_kept = true;
+                    }
+                }
+            }
+        }
+
+        // 自动修复：选项数量
+        if options.len() < 2 {
+            warn!(
+                "Coordinator 生成了 {} 个选项（需要 2-4 个），自动补充默认选项",
+                options.len()
+            );
+            while options.len() < 2 {
+                options.push(ClarificationOption {
+                    label: "其他".to_string(),
+                    description: "以上选项均不适用，手动输入".to_string(),
+                    recommended: false,
+                });
+            }
+        } else if options.len() > 4 {
+            warn!(
+                "Coordinator 生成了 {} 个选项（最多 4 个），自动截断",
+                options.len()
+            );
+            // 按 recommended 优先排序后截断前 4 个，再恢复原始顺序
+            let mut indexed: Vec<(usize, ClarificationOption)> =
+                options.into_iter().enumerate().collect();
+            indexed.sort_by(|a, b| {
+                b.1.recommended
+                    .cmp(&a.1.recommended)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            indexed.truncate(4);
+            indexed.sort_by(|a, b| a.0.cmp(&b.0));
+            options = indexed.into_iter().map(|(_, opt)| opt).collect();
+        }
+
+        // 兜底验证：自动修复后仍不符合则报错
         if options.len() < 2 || options.len() > 4 {
-            anyhow::bail!("选择题必须包含 2 到 4 个选项");
+            anyhow::bail!("选择题必须包含 2 到 4 个选项（自动修复后仍不符合）");
         }
         if options
             .iter()
@@ -424,7 +585,7 @@ fn normalize_clarifications(items: Vec<GeneratedClarification>) -> Result<Vec<Cl
             anyhow::bail!("澄清选项 label/description 不能为空");
         }
         if options.iter().filter(|option| option.recommended).count() > 1 {
-            anyhow::bail!("每个选择题最多只能有一个推荐选项");
+            anyhow::bail!("每个选择题最多只能有一个推荐选项（自动修复后仍不符合）");
         }
 
         seeds.push(ClarificationSeed {
@@ -711,5 +872,96 @@ mod tests {
             extract_json_object(text),
             Some(r#"{"first": 1}"#.to_string())
         );
+    }
+
+    // ---- 自动修复测试 ----
+
+    #[test]
+    fn auto_fixes_too_many_recommended() {
+        let parsed = parse_decision(
+            r#"{
+  "status": "needs_clarification",
+  "progress": "需要确认",
+  "clarifications": [
+    {
+      "question": "选择哪个？",
+      "type": "single_choice",
+      "options": [
+        {"label": "A", "description": "选项A", "recommended": true},
+        {"label": "B", "description": "选项B", "recommended": true},
+        {"label": "C", "description": "选项C", "recommended": true}
+      ],
+      "allowCustom": true
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.status, CoordinatorStatus::NeedsClarification);
+        let options = &parsed.clarifications[0].options;
+        assert_eq!(options.len(), 3);
+        assert!(options[0].recommended);
+        assert!(!options[1].recommended);
+        assert!(!options[2].recommended);
+    }
+
+    #[test]
+    fn auto_fixes_too_few_options() {
+        let parsed = parse_decision(
+            r#"{
+  "status": "needs_clarification",
+  "progress": "需要确认",
+  "clarifications": [
+    {
+      "question": "选择哪个？",
+      "type": "single_choice",
+      "options": [
+        {"label": "A", "description": "选项A", "recommended": true}
+      ],
+      "allowCustom": true
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.status, CoordinatorStatus::NeedsClarification);
+        let options = &parsed.clarifications[0].options;
+        assert_eq!(options.len(), 2);
+        assert!(options[0].recommended);
+        assert_eq!(options[1].label, "其他");
+    }
+
+    #[test]
+    fn auto_fixes_too_many_options() {
+        let parsed = parse_decision(
+            r#"{
+  "status": "needs_clarification",
+  "progress": "需要确认",
+  "clarifications": [
+    {
+      "question": "选择哪个？",
+      "type": "single_choice",
+      "options": [
+        {"label": "A", "description": "选项A"},
+        {"label": "B", "description": "选项B"},
+        {"label": "C", "description": "选项C", "recommended": true},
+        {"label": "D", "description": "选项D"},
+        {"label": "E", "description": "选项E"},
+        {"label": "F", "description": "选项F"}
+      ],
+      "allowCustom": true
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.status, CoordinatorStatus::NeedsClarification);
+        let options = &parsed.clarifications[0].options;
+        assert_eq!(options.len(), 4);
+        // recommended 的 C 应该保留
+        assert!(options.iter().any(|o| o.label == "C" && o.recommended));
     }
 }

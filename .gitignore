@@ -40,3 +40,6 @@ dist/
 
 # 日志
 *.log
+
+# Pi Agent sessions
+pi-sessions/

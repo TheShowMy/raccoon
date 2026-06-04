@@ -927,6 +927,29 @@ pub async fn confirm_job(pool: &Pool<Sqlite>, job_id: i64) -> Result<JobDetail> 
     get_job_detail(pool, job_id).await
 }
 
+pub async fn set_job_failed(pool: &Pool<Sqlite>, job_id: i64, reason: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE jobs
+         SET status = 'failed',
+             current_stage = 'failed',
+             updated_at = datetime('now')
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+
+    insert_job_message(
+        pool,
+        job_id,
+        "system",
+        &format!("Coordinator 分析失败: {}", reason),
+    )
+    .await?;
+
+    Ok(())
+}
+
 async fn get_job(pool: &Pool<Sqlite>, job_id: i64) -> Result<Job> {
     let job = sqlx::query_as::<_, Job>(
         "SELECT id, project_id, title, original_requirement, status, current_stage,

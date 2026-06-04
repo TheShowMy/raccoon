@@ -1,9 +1,12 @@
+import { useState } from "react";
 import {
   GitBranch,
   Clock,
   ExternalLink,
   Trash2,
   FolderGit,
+  ClipboardCheck,
+  MessageSquare,
 } from "lucide-react";
 import type { Project } from "../stores/useAppStore";
 import {
@@ -12,6 +15,7 @@ import {
   formatRelativeTime,
 } from "../utils/format";
 import { JobWorkspace } from "./JobWorkspace";
+import { HistoryView } from "./HistoryView";
 
 interface ProjectDetailProps {
   project: Project;
@@ -19,6 +23,9 @@ interface ProjectDetailProps {
 }
 
 export function ProjectDetail({ project, onDelete }: ProjectDetailProps) {
+  const [viewMode, setViewMode] = useState<"workspace" | "history">(
+    "workspace",
+  );
   const repoPath = parseGitRepoUrl(project.git_url);
   const host = parseGitHost(project.git_url);
   const createdAt = formatRelativeTime(project.created_at);
@@ -86,13 +93,44 @@ export function ProjectDetail({ project, onDelete }: ProjectDetailProps) {
         </div>
       </div>
 
+      {/* 视图切换 Tab */}
+      <div className="px-8 pt-4 pb-0">
+        <div className="flex items-center gap-1 border-b border-slate-100">
+          <button
+            onClick={() => setViewMode("workspace")}
+            className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition border-b-2 ${
+              viewMode === "workspace"
+                ? "border-amber-500 text-amber-700"
+                : "border-transparent text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            <MessageSquare className="w-3.5 h-3.5" />
+            任务工作台
+          </button>
+          <button
+            onClick={() => setViewMode("history")}
+            className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition border-b-2 ${
+              viewMode === "history"
+                ? "border-emerald-500 text-emerald-700"
+                : "border-transparent text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            <ClipboardCheck className="w-3.5 h-3.5" />
+            历史记录
+          </button>
+        </div>
+      </div>
+
       <div className="flex-1 p-8">
         <div className="max-w-6xl">
-          <div className="flex items-center gap-2 mb-4">
-            <div className="w-1 h-5 bg-amber-400 rounded-full" />
-            <h2 className="text-sm font-semibold text-slate-700">任务工作台</h2>
-          </div>
-          <JobWorkspace projectId={project.id} />
+          {viewMode === "workspace" ? (
+            <JobWorkspace projectId={project.id} />
+          ) : (
+            <HistoryView
+              projectId={project.id}
+              onBack={() => setViewMode("workspace")}
+            />
+          )}
         </div>
       </div>
     </div>
