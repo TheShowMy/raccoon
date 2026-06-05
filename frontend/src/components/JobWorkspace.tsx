@@ -92,8 +92,8 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
     });
   }, [loadJobs]);
 
-  const loadDetail = useCallback(async (jobId: number) => {
-    setLoadingDetail(true);
+  const loadDetail = useCallback(async (jobId: number, showLoading = true) => {
+    if (showLoading) setLoadingDetail(true);
     setMessage(null);
     try {
       const detail = await fetchJobDetail(jobId);
@@ -107,13 +107,15 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
         }
         return next;
       });
+      // 数据库已加载最新持久消息，清空临时 SSE 流事件
+      setStreamMessages([]);
     } catch (err) {
       setMessage({
         type: "error",
         text: err instanceof Error ? err.message : "加载会话详情失败",
       });
     } finally {
-      setLoadingDetail(false);
+      if (showLoading) setLoadingDetail(false);
     }
   }, []);
 
@@ -135,7 +137,13 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
     const handleStreamEvent = (event: MessageEvent) => {
       const parsed = JSON.parse(event.data) as StreamEvent;
       setStreamMessages((current) => [...current, parsed]);
-      void loadDetail(selectedJobId);
+      // progress 事件只作为临时提示，不触发 loadDetail（避免闪烁和滚动丢失）
+      if (
+        parsed.event !== "coordinator_started" &&
+        parsed.event !== "coordinator_progress"
+      ) {
+        void loadDetail(selectedJobId, false);
+      }
       void loadJobs();
     };
     source.onmessage = handleStreamEvent;
@@ -154,20 +162,9 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
     return () => source.close();
   }, [loadDetail, loadJobs, selectedJobId]);
 
-  // 轮次变化时清理 streamMessages
+  // 跟踪澄清轮次变化，用于判断是否需要重置相关状态
   useEffect(() => {
-    const currentRound = jobDetail?.job.clarificationRound ?? 0;
-    if (prevRoundRef.current !== 0 && currentRound !== prevRoundRef.current) {
-      setStreamMessages((current) =>
-        current.filter(
-          (e) =>
-            e.event === "clarifications_ready" ||
-            e.event === "task_draft_ready" ||
-            e.event === "archived",
-        ),
-      );
-    }
-    prevRoundRef.current = currentRound;
+    prevRoundRef.current = jobDetail?.job.clarificationRound ?? 0;
   }, [jobDetail?.job.clarificationRound]);
 
   // 自动滚动
@@ -235,7 +232,8 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
       const detail = await appendJobMessage(selectedJob.id, trimmed);
       applyDetail(detail);
       setRequirement("");
-      // 追加消息后不清除 streamMessages，因为 Coordinator 会继续分析
+      // 开始新一轮分析，清空旧的临时 SSE 流事件
+      setStreamMessages([]);
     } catch (err) {
       setMessage({
         type: "error",
