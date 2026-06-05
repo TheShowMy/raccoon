@@ -52,7 +52,7 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
     [jobDetail, jobs, selectedJobId],
   );
 
-  // 只显示活跃 job
+  // 只显示活跃 job（仅排除归档的）
   const activeJobs = useMemo(
     () => jobs.filter((job) => job.status !== "archived"),
     [jobs],
@@ -449,6 +449,12 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
               Coordinator 正在分析当前需求，请稍候...
             </p>
           )}
+          {selectedJob?.status === "failed" && (
+            <p className="mb-1.5 text-xs text-rose-500">
+              ⚠️
+              当前会话分析失败，补充说明后可继续分析，或清空输入框创建新会话。
+            </p>
+          )}
           <div className="flex gap-3">
             <textarea
               value={requirement}
@@ -456,9 +462,11 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
               disabled={inputDisabled}
               rows={2}
               placeholder={
-                canAppend
-                  ? "补充说明你的需求，Coordinator 会继续分析..."
-                  : "描述你的需求，Coordinator 会用聊天形式澄清并生成确认卡片..."
+                selectedJob?.status === "failed"
+                  ? "补充说明你的需求，将恢复并重新分析..."
+                  : canAppend
+                    ? "补充说明你的需求，Coordinator 会继续分析..."
+                    : "描述你的需求，Coordinator 会用聊天形式澄清并生成确认卡片..."
               }
               className="min-h-12 flex-1 resize-none rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-700 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-100 disabled:bg-slate-100 disabled:text-slate-400"
             />
