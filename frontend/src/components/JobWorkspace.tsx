@@ -15,6 +15,7 @@ import type { Job, JobDetail } from "../api/client";
 import { AnalysisStepper } from "./job/AnalysisStepper";
 import { ChatHeader } from "./job/ChatHeader";
 import { ClarificationWizard } from "./job/ClarificationWizard";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { ConfirmPanel } from "./job/ConfirmPanel";
 import { EmptyChat } from "./job/EmptyChat";
 import { MessageList } from "./job/MessageList";
@@ -50,6 +51,7 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
   const [confirming, setConfirming] = useState(false);
   const [appending, setAppending] = useState(false);
   const [message, setMessage] = useState<MessageType | null>(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [fileSuggestions, setFileSuggestions] = useState<string[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
@@ -501,12 +503,14 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
     }
   };
 
-  const handleDeleteJob = async () => {
+  const handleDeleteJob = () => {
     if (!selectedJob) return;
-    if (!window.confirm("确定要删除此会话吗？删除后无法恢复。")) {
-      return;
-    }
+    setShowDeleteConfirm(true);
+  };
 
+  const doDeleteJob = async () => {
+    if (!selectedJob) return;
+    setShowDeleteConfirm(false);
     setMessage(null);
     try {
       await deleteJob(selectedJob.id);
@@ -724,6 +728,17 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        show={showDeleteConfirm}
+        title="删除会话"
+        message="确定要删除此会话吗？删除后无法恢复。"
+        confirmText="删除"
+        cancelText="取消"
+        danger
+        onConfirm={doDeleteJob}
+        onCancel={() => setShowDeleteConfirm(false)}
+      />
     </div>
   );
 }
