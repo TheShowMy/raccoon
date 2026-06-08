@@ -38,6 +38,70 @@ struct JobEvent {
     message: String,
 }
 
+/// 全局应用状态，包含数据库连接、Pi Agent 进程池、事件广播等。
+#[derive(Clone)]
+struct AppState {
+    pool: Pool<Sqlite>,
+    default_pi_client: Arc<pi_rpc::PiRpcClient>,
+    job_pi_clients: Arc<tokio::sync::Mutex<HashMap<i64, Arc<pi_rpc::PiRpcClient>>>>,
+    workspace_dir: PathBuf,
+    pi_session_dir: PathBuf,
+    extension_path: Option<PathBuf>,
+    event_tx: EventSender,
+}
+
+impl AppState {
+    /// 获取或启动指定 job 的 Pi Agent 进程。
+    /// 每个 job 拥有独立的 Pi Agent，cwd 设为对应项目的本地目录。
+    async fn get_or_start_job_pi_client(
+        &self,
+        job_id: i64,
+        project_id: i64,
+    ) -> anyhow::Result<Arc<pi_rpc::PiRpcClient>> {
+        {
+            let clients = self.job_pi_clients.lock().await;
+            if let Some(client) = clients.get(&job_id) {
+                return Ok(client.clone());
+            }
+        }
+
+        let project = db::get_project(&self.pool, project_id).await?;
+        let local_path = project
+            .local_path
+            .as_deref()
+            .context("项目尚未克隆到本地，无法启动 Pi Agent")?;
+        let cwd = PathBuf::from(local_path);
+        anyhow::ensure!(cwd.exists(), "项目本地目录不存在: {}", cwd.display());
+
+        let client = pi_rpc::PiRpcClient::new_with_extension(
+            &self.pi_session_dir,
+            self.extension_path.as_deref(),
+            Some(&cwd),
+        )
+        .await
+        .with_context(|| format!("启动 job {} 的 Pi Agent 失败", job_id))?;
+
+        let client = Arc::new(client);
+        let mut clients = self.job_pi_clients.lock().await;
+        clients.insert(job_id, client.clone());
+
+        info!("为 job {} 启动 Pi Agent，cwd: {}", job_id, cwd.display());
+        Ok(client)
+    }
+
+    /// 关闭指定 job 的 Pi Agent 进程。
+    async fn shutdown_job_pi_client(&self, job_id: i64) {
+        let mut clients = self.job_pi_clients.lock().await;
+        if let Some(client) = clients.remove(&job_id) {
+            if let Err(e) = client.shutdown().await {
+                warn!("关闭 job {} 的 Pi Agent 失败: {}", job_id, e);
+            } else {
+                info!("关闭 job {} 的 Pi Agent", job_id);
+            }
+        }
+    }
+}
+
 /// 获取可执行文件所在目录
 fn exe_dir() -> Option<PathBuf> {
     std::env::current_exe()
@@ -109,10 +173,25 @@ async fn main() -> Result<()> {
     };
 
     let pi_session_dir = db_dir.join("pi-sessions");
-    let extension_path = std::path::Path::new("pi-extensions/coordinator-decision.ts");
+    let workspace_dir = db_dir.join("workspace");
+    if let Err(e) = std::fs::create_dir_all(&workspace_dir) {
+        warn!("创建工作区目录失败: {}", e);
+    }
+
+    // 扩展路径使用 db_dir 作为基准，确保开发和生产环境行为一致。
+    // db_dir 在开发时为项目根目录，生产时为可执行文件同级目录。
+    let ext_candidate = db_dir.join("pi-extensions/coordinator-decision.ts");
+    let extension_path = ext_candidate.exists().then_some(ext_candidate);
+    if let Some(ref p) = extension_path {
+        info!("加载 Coordinator 扩展: {}", p.display());
+    } else {
+        warn!("Coordinator 扩展未找到，将使用文本解析 fallback");
+    }
+    let coordinator_session_dir = pi_session_dir.join("coordinator");
     let pi_client = match pi_rpc::PiRpcClient::new_with_extension(
-        &pi_session_dir,
-        extension_path.exists().then_some(extension_path),
+        &coordinator_session_dir,
+        extension_path.as_deref(),
+        None,
     )
     .await
     {
@@ -127,7 +206,16 @@ async fn main() -> Result<()> {
     };
 
     let (event_tx, _) = broadcast::channel(256);
-    let app = create_router(pool, pi_client, event_tx);
+    let state = Arc::new(AppState {
+        pool: pool.clone(),
+        default_pi_client: pi_client.clone(),
+        job_pi_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        workspace_dir: workspace_dir.clone(),
+        pi_session_dir: pi_session_dir.clone(),
+        extension_path: extension_path.clone(),
+        event_tx: event_tx.clone(),
+    });
+    let app = create_router(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], PORT));
     info!("🦝 raccoon 服务启动于 http://{}", addr);
@@ -138,11 +226,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn create_router(
-    pool: Pool<Sqlite>,
-    pi_client: Arc<pi_rpc::PiRpcClient>,
-    event_tx: EventSender,
-) -> Router {
+fn create_router(state: Arc<AppState>) -> Router {
     let api_routes = Router::new()
         .route("/api/health", get(health_handler))
         .route("/api/pi-status", get(pi_status_handler))
@@ -154,7 +238,10 @@ fn create_router(
             "/api/projects/:id/jobs",
             get(list_project_jobs_handler).post(create_job_handler),
         )
-        .route("/api/jobs/:id", get(get_job_handler))
+        .route(
+            "/api/jobs/:id",
+            get(get_job_handler).delete(delete_job_handler),
+        )
         .route("/api/jobs/:id/events", get(job_events_handler))
         .route(
             "/api/jobs/:id/clarifications",
@@ -187,9 +274,11 @@ fn create_router(
             "/api/thinking-policies",
             get(list_thinking_policies_handler),
         )
-        .layer(Extension(pool))
-        .layer(Extension(pi_client))
-        .layer(Extension(event_tx));
+        .route("/api/projects/:id", get(get_project_handler))
+        .route("/api/projects/:id/files", get(list_project_files_handler))
+        .route("/api/projects/:id/clone", post(reclone_project_handler))
+        .route("/api/jobs/:id/close-agent", post(close_job_agent_handler))
+        .layer(Extension(state));
 
     let frontend_router = if let Some(dir) = find_frontend_dir() {
         info!("前端静态文件目录: {}", dir.display());
@@ -251,9 +340,9 @@ impl<T: Serialize> ApiResponse<T> {
 }
 
 async fn list_projects_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(state): Extension<Arc<AppState>>,
 ) -> Json<ApiResponse<Vec<db::Project>>> {
-    match db::get_projects(&pool).await {
+    match db::get_projects(&state.pool).await {
         Ok(projects) => Json(ApiResponse::ok(projects)),
         Err(e) => {
             warn!("获取项目列表失败: {}", e);
@@ -263,7 +352,7 @@ async fn list_projects_handler(
 }
 
 async fn create_project_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(state): Extension<Arc<AppState>>,
     axum::extract::Json(req): axum::extract::Json<CreateProjectRequest>,
 ) -> Json<ApiResponse<db::Project>> {
     if req.name.trim().is_empty() {
@@ -273,8 +362,84 @@ async fn create_project_handler(
         return Json(ApiResponse::err("Git 链接不能为空"));
     }
 
-    match db::create_project(&pool, &req.name, &req.git_url).await {
-        Ok(project) => Json(ApiResponse::ok(project)),
+    match db::create_project(&state.pool, &req.name, &req.git_url).await {
+        Ok(project) => {
+            let project_id = project.id;
+            let git_url = req.git_url;
+            let name = req.name.trim().to_string();
+            let workspace = state.workspace_dir.clone();
+            let pool_clone = state.pool.clone();
+            tokio::spawn(async move {
+                let safe_name = name
+                    .to_lowercase()
+                    .replace(' ', "-")
+                    .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
+                let project_dir = workspace.join(format!("project-{}-{}", project_id, safe_name));
+
+                if let Err(e) = std::fs::create_dir_all(&workspace) {
+                    warn!("创建工作区目录失败: {}", e);
+                    let _ = db::update_project_clone_status(
+                        &pool_clone,
+                        project_id,
+                        None,
+                        "failed",
+                        Some(&format!("创建工作区目录失败: {}", e)),
+                    )
+                    .await;
+                    return;
+                }
+
+                let output = tokio::process::Command::new("git")
+                    .arg("clone")
+                    .arg(&git_url)
+                    .arg(&project_dir)
+                    .output()
+                    .await;
+
+                match output {
+                    Ok(out) if out.status.success() => {
+                        let local_path = project_dir.to_string_lossy().to_string();
+                        if let Err(e) = db::update_project_clone_status(
+                            &pool_clone,
+                            project_id,
+                            Some(&local_path),
+                            "ready",
+                            None,
+                        )
+                        .await
+                        {
+                            warn!("更新项目克隆状态失败: {}", e);
+                        } else {
+                            info!("项目 {} 克隆完成: {}", project_id, local_path);
+                        }
+                    }
+                    Ok(out) => {
+                        let err = String::from_utf8_lossy(&out.stderr).to_string();
+                        warn!("克隆项目 {} 失败: {}", project_id, err);
+                        let _ = db::update_project_clone_status(
+                            &pool_clone,
+                            project_id,
+                            None,
+                            "failed",
+                            Some(&err),
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        warn!("执行 git clone 失败: {}", e);
+                        let _ = db::update_project_clone_status(
+                            &pool_clone,
+                            project_id,
+                            None,
+                            "failed",
+                            Some(&format!("执行 git clone 失败: {}", e)),
+                        )
+                        .await;
+                    }
+                }
+            });
+            Json(ApiResponse::ok(project))
+        }
         Err(e) => {
             warn!("创建项目失败: {}", e);
             Json(ApiResponse::err(e.to_string()))
@@ -282,11 +447,159 @@ async fn create_project_handler(
     }
 }
 
+async fn get_project_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(project_id): Path<i64>,
+) -> Json<ApiResponse<db::Project>> {
+    match db::get_project(&state.pool, project_id).await {
+        Ok(project) => Json(ApiResponse::ok(project)),
+        Err(e) => {
+            warn!("获取项目详情失败: {}", e);
+            Json(ApiResponse::err(format!("获取失败: {}", e)))
+        }
+    }
+}
+
+async fn list_project_files_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(project_id): Path<i64>,
+    Query(query): Query<ListProjectFilesQuery>,
+) -> Json<ApiResponse<Vec<String>>> {
+    match list_project_files(&state.pool, project_id, query.query.as_deref()).await {
+        Ok(files) => Json(ApiResponse::ok(files)),
+        Err(e) => {
+            warn!("获取项目文件列表失败: {}", e);
+            Json(ApiResponse::err(format!("获取失败: {}", e)))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ListProjectFilesQuery {
+    #[serde(default)]
+    query: Option<String>,
+}
+
+async fn list_project_files(
+    pool: &Pool<Sqlite>,
+    project_id: i64,
+    filter: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let project = db::get_project(pool, project_id).await?;
+    let local_path = project
+        .local_path
+        .as_deref()
+        .context("项目尚未克隆到本地")?;
+    let root = PathBuf::from(local_path);
+    anyhow::ensure!(root.exists(), "项目本地目录不存在: {}", root.display());
+
+    let filter_lower = filter.map(|s| s.to_lowercase());
+    let mut files = Vec::new();
+    collect_text_files(&root, &root, &filter_lower, &mut files)?;
+    files.truncate(50);
+    Ok(files)
+}
+
+fn collect_text_files(
+    root: &PathBuf,
+    current: &PathBuf,
+    filter: &Option<String>,
+    out: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    if out.len() >= 50 {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+
+        // 跳过隐藏目录和常见构建产物
+        if name.starts_with('.')
+            || name == "node_modules"
+            || name == "target"
+            || name == "dist"
+            || name == "build"
+            || name == "vendor"
+        {
+            continue;
+        }
+
+        if path.is_dir() {
+            collect_text_files(root, &path, filter, out)?;
+        } else if path.is_file() {
+            // 简单跳过已知二进制后缀
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if matches!(
+                ext,
+                "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "gif"
+                    | "ico"
+                    | "svg"
+                    | "webp"
+                    | "mp3"
+                    | "mp4"
+                    | "wav"
+                    | "ogg"
+                    | "webm"
+                    | "zip"
+                    | "tar"
+                    | "gz"
+                    | "rar"
+                    | "7z"
+                    | "pdf"
+                    | "doc"
+                    | "docx"
+                    | "xls"
+                    | "xlsx"
+                    | "exe"
+                    | "dll"
+                    | "so"
+                    | "dylib"
+                    | "ttf"
+                    | "otf"
+                    | "woff"
+                    | "woff2"
+                    | "eot"
+                    | "wasm"
+                    | "map"
+            ) {
+                continue;
+            }
+
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+
+            if let Some(f) = filter {
+                if !rel_str.to_lowercase().contains(f) {
+                    continue;
+                }
+            }
+
+            out.push(rel_str);
+        }
+    }
+
+    Ok(())
+}
+
+async fn reclone_project_handler(
+    Extension(_state): Extension<Arc<AppState>>,
+    Path(_id): Path<i64>,
+) -> Json<ApiResponse<bool>> {
+    Json(ApiResponse::err("重新克隆功能尚未实现"))
+}
+
 async fn delete_project_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(state): Extension<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Json<ApiResponse<bool>> {
-    match db::delete_project(&pool, id).await {
+    match db::delete_project(&state.pool, id).await {
         Ok(deleted) => Json(ApiResponse::ok(deleted)),
         Err(e) => {
             warn!("删除项目失败: {}", e);
@@ -321,11 +634,11 @@ struct ListJobsQuery {
 }
 
 async fn list_project_jobs_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(state): Extension<Arc<AppState>>,
     Path(project_id): Path<i64>,
     Query(query): Query<ListJobsQuery>,
 ) -> Json<ApiResponse<Vec<db::Job>>> {
-    match db::get_project_jobs(&pool, project_id, query.include_archived).await {
+    match db::get_project_jobs(&state.pool, project_id, query.include_archived).await {
         Ok(jobs) => Json(ApiResponse::ok(jobs)),
         Err(e) => {
             warn!("获取 Job 列表失败: {}", e);
@@ -335,9 +648,7 @@ async fn list_project_jobs_handler(
 }
 
 async fn create_job_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
-    Extension(pi_client): Extension<Arc<pi_rpc::PiRpcClient>>,
-    Extension(event_tx): Extension<EventSender>,
+    Extension(state): Extension<Arc<AppState>>,
     Path(project_id): Path<i64>,
     axum::extract::Json(req): axum::extract::Json<CreateJobRequest>,
 ) -> Json<ApiResponse<db::JobDetail>> {
@@ -346,7 +657,7 @@ async fn create_job_handler(
         return Json(ApiResponse::err("需求内容不能为空"));
     }
 
-    let system_config = match db::get_system_config(&pool).await {
+    let system_config = match db::get_system_config(&state.pool).await {
         Ok(config) => config,
         Err(e) => {
             warn!("读取 Coordinator 配置失败: {}", e);
@@ -364,15 +675,24 @@ async fn create_job_handler(
         ));
     }
 
-    match db::create_analyzing_job(&pool, project_id, requirement).await {
+    match db::create_analyzing_job(&state.pool, project_id, requirement).await {
         Ok(detail) => {
             let job_id = detail.job.id;
+            let pi_client = match state.get_or_start_job_pi_client(job_id, project_id).await {
+                Ok(client) => client,
+                Err(e) => {
+                    warn!("启动 job Pi Agent 失败: {}", e);
+                    let _ = db::set_job_failed(&state.pool, job_id, &e.to_string()).await;
+                    return Json(ApiResponse::err(format!("启动 Pi Agent 失败: {}", e)));
+                }
+            };
             spawn_initial_analysis(
-                pool.clone(),
+                state.pool.clone(),
                 pi_client,
-                event_tx,
+                state.event_tx.clone(),
                 system_config,
                 job_id,
+                project_id,
                 detail.job.title.clone(),
                 requirement.to_string(),
             );
@@ -386,10 +706,10 @@ async fn create_job_handler(
 }
 
 async fn get_job_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(state): Extension<Arc<AppState>>,
     Path(job_id): Path<i64>,
 ) -> Json<ApiResponse<db::JobDetail>> {
-    match db::get_job_detail(&pool, job_id).await {
+    match db::get_job_detail(&state.pool, job_id).await {
         Ok(detail) => Json(ApiResponse::ok(detail)),
         Err(e) => {
             warn!("获取 Job 详情失败: {}", e);
@@ -399,16 +719,37 @@ async fn get_job_handler(
 }
 
 async fn submit_clarifications_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
-    Extension(pi_client): Extension<Arc<pi_rpc::PiRpcClient>>,
-    Extension(event_tx): Extension<EventSender>,
+    Extension(state): Extension<Arc<AppState>>,
     Path(job_id): Path<i64>,
     axum::extract::Json(req): axum::extract::Json<SubmitClarificationsRequest>,
 ) -> Json<ApiResponse<db::JobDetail>> {
-    match db::submit_clarification_answers(&pool, job_id, &req.answers).await {
+    match db::submit_clarification_answers(&state.pool, job_id, &req.answers).await {
         Ok(detail) => {
             if detail.job.status == "analyzing" {
-                spawn_followup_analysis(pool.clone(), pi_client, event_tx, job_id);
+                let detail_for_project = match db::get_job_detail(&state.pool, job_id).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        warn!("获取 job 详情失败: {}", e);
+                        return Json(ApiResponse::err(format!("获取 job 详情失败: {}", e)));
+                    }
+                };
+                let project_id = detail_for_project.job.project_id;
+                let pi_client = match state.get_or_start_job_pi_client(job_id, project_id).await {
+                    Ok(client) => client,
+                    Err(e) => {
+                        warn!("启动 job Pi Agent 失败: {}", e);
+                        let _ = db::set_job_failed(&state.pool, job_id, &e.to_string()).await;
+                        return Json(ApiResponse::err(format!("启动 Pi Agent 失败: {}", e)));
+                    }
+                };
+                spawn_followup_analysis(
+                    state.pool.clone(),
+                    pi_client,
+                    state.event_tx.clone(),
+                    job_id,
+                    project_id,
+                    state.clone(),
+                );
             }
             Json(ApiResponse::ok(detail))
         }
@@ -420,13 +761,18 @@ async fn submit_clarifications_handler(
 }
 
 async fn confirm_job_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
-    Extension(event_tx): Extension<EventSender>,
+    Extension(state): Extension<Arc<AppState>>,
     Path(job_id): Path<i64>,
 ) -> Json<ApiResponse<db::JobDetail>> {
-    match db::confirm_job(&pool, job_id).await {
+    match db::confirm_job(&state.pool, job_id).await {
         Ok(detail) => {
-            emit_job_event(&event_tx, job_id, "archived", "需求已确认，会话已归档。");
+            emit_job_event(
+                &state.event_tx,
+                job_id,
+                "archived",
+                "需求已确认，会话已归档。",
+            );
+            state.shutdown_job_pi_client(job_id).await;
             Json(ApiResponse::ok(detail))
         }
         Err(e) => {
@@ -436,10 +782,25 @@ async fn confirm_job_handler(
     }
 }
 
+async fn delete_job_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(job_id): Path<i64>,
+) -> Json<ApiResponse<bool>> {
+    match db::delete_job(&state.pool, job_id).await {
+        Ok(()) => {
+            emit_job_event(&state.event_tx, job_id, "deleted", "会话已删除。");
+            state.shutdown_job_pi_client(job_id).await;
+            Json(ApiResponse::ok(true))
+        }
+        Err(e) => {
+            warn!("删除 Job 失败: {}", e);
+            Json(ApiResponse::err(format!("删除失败: {}", e)))
+        }
+    }
+}
+
 async fn append_job_message_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
-    Extension(pi_client): Extension<Arc<pi_rpc::PiRpcClient>>,
-    Extension(event_tx): Extension<EventSender>,
+    Extension(state): Extension<Arc<AppState>>,
     Path(job_id): Path<i64>,
     axum::extract::Json(req): axum::extract::Json<AppendMessageRequest>,
 ) -> Json<ApiResponse<db::JobDetail>> {
@@ -448,11 +809,34 @@ async fn append_job_message_handler(
         return Json(ApiResponse::err("消息内容不能为空"));
     }
 
-    match db::append_job_message(&pool, job_id, content).await {
+    match db::append_job_message(&state.pool, job_id, content).await {
         Ok(detail) => {
             // 如果状态恢复为 analyzing，触发 Coordinator 继续分析
             if detail.job.status == "analyzing" {
-                spawn_followup_analysis(pool, pi_client, event_tx, job_id);
+                let detail_for_project = match db::get_job_detail(&state.pool, job_id).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        warn!("获取 job 详情失败: {}", e);
+                        return Json(ApiResponse::err(format!("获取 job 详情失败: {}", e)));
+                    }
+                };
+                let project_id = detail_for_project.job.project_id;
+                let pi_client = match state.get_or_start_job_pi_client(job_id, project_id).await {
+                    Ok(client) => client,
+                    Err(e) => {
+                        warn!("启动 job Pi Agent 失败: {}", e);
+                        let _ = db::set_job_failed(&state.pool, job_id, &e.to_string()).await;
+                        return Json(ApiResponse::err(format!("启动 Pi Agent 失败: {}", e)));
+                    }
+                };
+                spawn_followup_analysis(
+                    state.pool.clone(),
+                    pi_client,
+                    state.event_tx.clone(),
+                    job_id,
+                    project_id,
+                    state.clone(),
+                );
             }
             Json(ApiResponse::ok(detail))
         }
@@ -463,26 +847,37 @@ async fn append_job_message_handler(
     }
 }
 
+async fn close_job_agent_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(job_id): Path<i64>,
+) -> Json<ApiResponse<bool>> {
+    state.shutdown_job_pi_client(job_id).await;
+    Json(ApiResponse::ok(true))
+}
+
 async fn job_events_handler(
-    Extension(event_tx): Extension<EventSender>,
+    Extension(state): Extension<Arc<AppState>>,
     Path(job_id): Path<i64>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
-    let stream = BroadcastStream::new(event_tx.subscribe()).filter_map(move |item| match item {
-        Ok(event) if event.job_id == job_id => serde_json::to_string(&event)
-            .ok()
-            .map(|data| Ok(Event::default().event(event.event).data(data))),
-        _ => None,
-    });
+    let stream =
+        BroadcastStream::new(state.event_tx.subscribe()).filter_map(move |item| match item {
+            Ok(event) if event.job_id == job_id => serde_json::to_string(&event)
+                .ok()
+                .map(|data| Ok(Event::default().event(event.event).data(data))),
+            _ => None,
+        });
 
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_initial_analysis(
     pool: Pool<Sqlite>,
     pi_client: Arc<pi_rpc::PiRpcClient>,
     event_tx: EventSender,
     system_config: db::SystemConfig,
     job_id: i64,
+    project_id: i64,
     title: String,
     requirement: String,
 ) {
@@ -499,6 +894,7 @@ fn spawn_initial_analysis(
             &event_tx,
             system_config,
             job_id,
+            project_id,
             &title,
             &requirement,
         )
@@ -525,6 +921,8 @@ fn spawn_followup_analysis(
     pi_client: Arc<pi_rpc::PiRpcClient>,
     event_tx: EventSender,
     job_id: i64,
+    project_id: i64,
+    state: Arc<AppState>,
 ) {
     tokio::spawn(async move {
         emit_job_event(
@@ -533,9 +931,13 @@ fn spawn_followup_analysis(
             "coordinator_started",
             "Coordinator 正在继续分析澄清答案。",
         );
-        if let Err(e) = run_followup_analysis(&pool, &pi_client, &event_tx, job_id).await {
+        if let Err(e) =
+            run_followup_analysis(&pool, &pi_client, &event_tx, job_id, project_id).await
+        {
             let err_msg = format!("{}", e);
             warn!("Coordinator 后续分析失败: {}", err_msg);
+            // 关闭失败的 Pi Agent 进程
+            state.shutdown_job_pi_client(job_id).await;
             // 更新数据库状态为 failed，避免前端无限等待
             if let Err(db_err) = db::set_job_failed(&pool, job_id, &err_msg).await {
                 warn!("标记 job 为 failed 失败: {}", db_err);
@@ -550,22 +952,42 @@ fn spawn_followup_analysis(
     });
 }
 
+async fn build_project_context(
+    pool: &Pool<Sqlite>,
+    project_id: i64,
+) -> Result<coordinator::ProjectContext> {
+    let project = db::get_project(pool, project_id).await?;
+    let local_path = project
+        .local_path
+        .as_deref()
+        .context("项目尚未克隆到本地")?;
+    Ok(coordinator::ProjectContext {
+        name: project.name,
+        git_url: project.git_url,
+        local_path: local_path.to_string(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_initial_analysis(
     pool: &Pool<Sqlite>,
     pi_client: &pi_rpc::PiRpcClient,
     event_tx: &EventSender,
     system_config: db::SystemConfig,
     job_id: i64,
+    project_id: i64,
     title: &str,
     requirement: &str,
 ) -> Result<()> {
     let thinking_level = get_requirement_thinking_level(pool).await;
+    let project_ctx = build_project_context(pool, project_id).await.ok();
     let decision = coordinator::start_requirement_analysis(
         pi_client,
         &system_config,
         &thinking_level,
         requirement,
         title,
+        project_ctx.as_ref(),
     )
     .await?;
 
@@ -584,6 +1006,7 @@ async fn run_followup_analysis(
     pi_client: &pi_rpc::PiRpcClient,
     event_tx: &EventSender,
     job_id: i64,
+    project_id: i64,
 ) -> Result<()> {
     let detail = db::get_job_detail(pool, job_id).await?;
     if detail.job.clarification_round >= 5 {
@@ -621,12 +1044,14 @@ async fn run_followup_analysis(
         .unwrap_or("用户已提交澄清答案。");
     let system_config = db::get_system_config(pool).await?;
     let thinking_level = get_requirement_thinking_level(pool).await;
+    let project_ctx = build_project_context(pool, project_id).await.ok();
     let decision = coordinator::continue_requirement_analysis(
         pi_client,
         &system_config,
         &thinking_level,
         session_file,
         answer_summary,
+        project_ctx.as_ref(),
     )
     .await?;
 
@@ -864,7 +1289,9 @@ fn delete_pi_auth(provider: &str) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-async fn pi_config_handler() -> Json<ApiResponse<PiConfigResponse>> {
+async fn pi_config_handler(
+    Extension(_state): Extension<Arc<AppState>>,
+) -> Json<ApiResponse<PiConfigResponse>> {
     match (read_pi_settings(), read_pi_auth_public()) {
         (Ok(settings), Ok(auth)) => Json(ApiResponse::ok(PiConfigResponse { settings, auth })),
         (Err(e), _) | (_, Err(e)) => {
@@ -885,6 +1312,7 @@ struct UpdatePiSettingsRequest {
 }
 
 async fn update_pi_settings_handler(
+    Extension(_state): Extension<Arc<AppState>>,
     axum::extract::Json(req): axum::extract::Json<UpdatePiSettingsRequest>,
 ) -> Json<ApiResponse<bool>> {
     let settings = PiSettings {
@@ -912,6 +1340,7 @@ struct UpdatePiAuthRequest {
 }
 
 async fn update_pi_auth_handler(
+    Extension(_state): Extension<Arc<AppState>>,
     axum::extract::Json(req): axum::extract::Json<UpdatePiAuthRequest>,
 ) -> Json<ApiResponse<bool>> {
     if req.provider.trim().is_empty() {
@@ -933,7 +1362,10 @@ async fn update_pi_auth_handler(
     }
 }
 
-async fn delete_pi_auth_handler(Path(provider): Path<String>) -> Json<ApiResponse<bool>> {
+async fn delete_pi_auth_handler(
+    Extension(_state): Extension<Arc<AppState>>,
+    Path(provider): Path<String>,
+) -> Json<ApiResponse<bool>> {
     match delete_pi_auth(&provider) {
         Ok(()) => Json(ApiResponse::ok(true)),
         Err(e) => {
@@ -946,9 +1378,9 @@ async fn delete_pi_auth_handler(Path(provider): Path<String>) -> Json<ApiRespons
 // ===== Pi 可用模型列表 =====
 
 async fn list_models_handler(
-    Extension(pi_client): Extension<std::sync::Arc<pi_rpc::PiRpcClient>>,
+    Extension(state): Extension<Arc<AppState>>,
 ) -> Json<ApiResponse<Vec<pi_rpc::PiModel>>> {
-    match pi_client.get_available_models().await {
+    match state.default_pi_client.get_available_models().await {
         Ok(models) => Json(ApiResponse::ok(models)),
         Err(e) => {
             warn!("获取模型列表失败: {}", e);
@@ -960,9 +1392,9 @@ async fn list_models_handler(
 // ===== System Config API =====
 
 async fn get_system_config_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(state): Extension<Arc<AppState>>,
 ) -> Json<ApiResponse<db::SystemConfig>> {
-    match db::get_system_config(&pool).await {
+    match db::get_system_config(&state.pool).await {
         Ok(config) => Json(ApiResponse::ok(config)),
         Err(e) => {
             warn!("获取系统配置失败: {}", e);
@@ -980,7 +1412,7 @@ struct UpdateSystemConfigRequest {
 }
 
 async fn update_system_config_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(state): Extension<Arc<AppState>>,
     axum::extract::Json(req): axum::extract::Json<UpdateSystemConfigRequest>,
 ) -> Json<ApiResponse<bool>> {
     if req.coordinator_provider.trim().is_empty() {
@@ -990,7 +1422,13 @@ async fn update_system_config_handler(
         return Json(ApiResponse::err("Coordinator Model 不能为空"));
     }
 
-    match db::update_system_config(&pool, &req.coordinator_provider, &req.coordinator_model).await {
+    match db::update_system_config(
+        &state.pool,
+        &req.coordinator_provider,
+        &req.coordinator_model,
+    )
+    .await
+    {
         Ok(()) => Json(ApiResponse::ok(true)),
         Err(e) => {
             warn!("更新系统配置失败: {}", e);
@@ -1002,9 +1440,9 @@ async fn update_system_config_handler(
 // ===== Worker Tier CRUD =====
 
 async fn list_worker_tiers_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(state): Extension<Arc<AppState>>,
 ) -> Json<ApiResponse<Vec<db::WorkerModelTier>>> {
-    match db::get_worker_model_tiers(&pool).await {
+    match db::get_worker_model_tiers(&state.pool).await {
         Ok(tiers) => Json(ApiResponse::ok(tiers)),
         Err(e) => {
             warn!("获取 Worker Tier 列表失败: {}", e);
@@ -1024,7 +1462,7 @@ struct CreateWorkerTierRequest {
 }
 
 async fn create_worker_tier_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(state): Extension<Arc<AppState>>,
     axum::extract::Json(req): axum::extract::Json<CreateWorkerTierRequest>,
 ) -> Json<ApiResponse<db::WorkerModelTier>> {
     if req.identity.trim().is_empty() {
@@ -1041,7 +1479,7 @@ async fn create_worker_tier_handler(
     }
 
     match db::create_worker_model_tier(
-        &pool,
+        &state.pool,
         &req.identity,
         req.tier_level,
         &req.provider,
@@ -1069,7 +1507,7 @@ struct UpdateWorkerTierRequest {
 }
 
 async fn update_worker_tier_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(state): Extension<Arc<AppState>>,
     Path(id): Path<i64>,
     axum::extract::Json(req): axum::extract::Json<UpdateWorkerTierRequest>,
 ) -> Json<ApiResponse<bool>> {
@@ -1087,7 +1525,7 @@ async fn update_worker_tier_handler(
     }
 
     match db::update_worker_model_tier(
-        &pool,
+        &state.pool,
         id,
         &req.identity,
         req.tier_level,
@@ -1106,10 +1544,10 @@ async fn update_worker_tier_handler(
 }
 
 async fn delete_worker_tier_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(state): Extension<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Json<ApiResponse<bool>> {
-    match db::delete_worker_model_tier(&pool, id).await {
+    match db::delete_worker_model_tier(&state.pool, id).await {
         Ok(deleted) => Json(ApiResponse::ok(deleted)),
         Err(e) => {
             warn!("删除 Worker Tier 失败: {}", e);
@@ -1121,9 +1559,9 @@ async fn delete_worker_tier_handler(
 // ===== Thinking Policies API =====
 
 async fn list_thinking_policies_handler(
-    Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(state): Extension<Arc<AppState>>,
 ) -> Json<ApiResponse<Vec<db::TaskThinkingPolicy>>> {
-    match db::get_task_thinking_policies(&pool).await {
+    match db::get_task_thinking_policies(&state.pool).await {
         Ok(policies) => Json(ApiResponse::ok(policies)),
         Err(e) => {
             warn!("获取思考策略列表失败: {}", e);

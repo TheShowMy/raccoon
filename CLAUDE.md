@@ -39,6 +39,10 @@ npm run dev
 - 不要把项目私有数据硬编码进共享 skill
 - **禁止直接执行 `pi --list-models` 等一次性命令获取数据** — 必须通过 RPC 子进程调用对应命令（如 `get_available_models`）
 
+## 路径注意事项
+
+打包后可执行文件位置变化，所有资源路径（扩展、前端、数据库等）需同时兼容 `cargo run`（项目根目录）和独立运行（可执行文件同级目录）两种情况。
+
 ## 绝对规则
 
 - **所有新增代码必须通过 pre-commit 规则检查。** 提交代码时禁止绕过或忽略 pre-commit 钩子（如 `git commit --no-verify`）。如果 pre-commit 失败，必须先修复问题再提交。

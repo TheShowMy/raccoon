@@ -50,6 +50,27 @@ export async function deleteProject(id: number): Promise<boolean> {
   return handleResponse<boolean>(res);
 }
 
+export async function fetchProject(id: number): Promise<Project> {
+  const res = await fetch(`/api/projects/${id}`);
+  return handleResponse<Project>(res);
+}
+
+export async function fetchProjectFiles(
+  projectId: number,
+  query?: string,
+): Promise<string[]> {
+  const params = query ? `?query=${encodeURIComponent(query)}` : "";
+  const res = await fetch(`/api/projects/${projectId}/files${params}`);
+  return handleResponse<string[]>(res);
+}
+
+export async function closeJobAgent(jobId: number): Promise<boolean> {
+  const res = await fetch(`/api/jobs/${jobId}/close-agent`, {
+    method: "POST",
+  });
+  return handleResponse<boolean>(res);
+}
+
 // ===== Pi Models API =====
 
 export interface PiModel {
@@ -282,6 +303,13 @@ export async function confirmJob(jobId: number): Promise<JobDetail> {
     method: "POST",
   });
   return handleResponse<JobDetail>(res);
+}
+
+export async function deleteJob(jobId: number): Promise<boolean> {
+  const res = await fetch(`/api/jobs/${jobId}`, {
+    method: "DELETE",
+  });
+  return handleResponse<boolean>(res);
 }
 
 export async function appendJobMessage(

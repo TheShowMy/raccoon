@@ -31,8 +31,8 @@ export function ProjectList() {
     <div className="flex-1 overflow-y-auto py-2 px-2">
       {projects.map((project) => {
         const isActive = currentProjectId === project.id;
-        const repoPath = parseGitRepoUrl(project.git_url);
-        const createdAt = formatRelativeTime(project.created_at);
+        const repoPath = parseGitRepoUrl(project.gitUrl);
+        const createdAt = formatRelativeTime(project.createdAt);
 
         return (
           <button
@@ -55,9 +55,25 @@ export function ProjectList() {
                 >
                   {project.name}
                 </p>
-                <span className="text-[10px] text-slate-400 shrink-0">
-                  {createdAt}
-                </span>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {project.cloneStatus && project.cloneStatus !== "ready" && (
+                    <span
+                      className={`text-[10px] px-1.5 py-0.5 rounded ${
+                        project.cloneStatus === "failed"
+                          ? "bg-rose-100 text-rose-600"
+                          : "bg-amber-100 text-amber-600"
+                      }`}
+                      title={project.cloneError ?? undefined}
+                    >
+                      {project.cloneStatus === "pending" && "克隆中"}
+                      {project.cloneStatus === "cloning" && "克隆中"}
+                      {project.cloneStatus === "failed" && "克隆失败"}
+                    </span>
+                  )}
+                  <span className="text-[10px] text-slate-400">
+                    {createdAt}
+                  </span>
+                </div>
               </div>
 
               {/* Row 2: repo path (full width) */}
@@ -67,7 +83,7 @@ export function ProjectList() {
                   className={`text-[11px] truncate font-mono ${
                     isActive ? "text-slate-500" : "text-slate-400"
                   }`}
-                  title={project.git_url}
+                  title={project.gitUrl}
                 >
                   {repoPath}
                 </p>

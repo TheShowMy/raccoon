@@ -1,3 +1,4 @@
+import { X } from "lucide-react";
 import { getJobTitle } from "./types";
 import type { Job, JobStatus } from "./types";
 
@@ -28,9 +29,12 @@ function StatusBadge({ status }: { status: JobStatus }) {
 interface ChatHeaderProps {
   job: Job;
   round?: number;
+  onClose?: () => void;
 }
 
-export function ChatHeader({ job, round }: ChatHeaderProps) {
+export function ChatHeader({ job, round, onClose }: ChatHeaderProps) {
+  const canClose = job.status !== "archived";
+
   return (
     <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-2">
       <div className="min-w-0 flex-1">
@@ -46,6 +50,16 @@ export function ChatHeader({ job, round }: ChatHeaderProps) {
           )}
         </div>
       </div>
+      {canClose && onClose && (
+        <button
+          onClick={onClose}
+          title="删除此会话"
+          className="shrink-0 flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-slate-500 transition hover:bg-rose-50 hover:text-rose-600"
+        >
+          <X className="h-3.5 w-3.5" />
+          删除
+        </button>
+      )}
     </div>
   );
 }

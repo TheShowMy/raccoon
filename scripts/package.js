@@ -66,13 +66,23 @@ function copyDir(src, dst) {
 
 copyDir(frontendDist, frontendOut)
 
-// 4. 复制图标
+// 4. 复制 Coordinator 扩展
+const extSrc = path.join(root, 'pi-extensions')
+if (fs.existsSync(extSrc)) {
+  const extOut = path.join(dist, 'pi-extensions')
+  mkdir(extOut)
+  copyDir(extSrc, extOut)
+} else {
+  console.warn('⚠️ pi-extensions 目录不存在，Coordinator 扩展将不可用')
+}
+
+// 5. 复制图标
 const iconSrc = path.join(root, 'assets', 'raccoon-icon.png')
 if (fs.existsSync(iconSrc)) {
   cp(iconSrc, path.join(dist, 'raccoon-icon.png'))
 }
 
-// 5. 创建各平台启动脚本
+// 6. 创建各平台启动脚本
 
 // macOS: start.command（双击启动）
 const macScript = `#!/bin/bash

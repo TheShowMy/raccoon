@@ -2,9 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, Loader2, Send } from "lucide-react";
 import {
   appendJobMessage,
+  closeJobAgent,
+  deleteJob,
   confirmJob,
   createJob,
   fetchJobDetail,
+  fetchProjectFiles,
   fetchProjectJobs,
   submitClarifications,
 } from "../api/client";
@@ -23,12 +26,18 @@ import {
   createEmptyAnswer,
   hasAnswer,
 } from "./job/types";
+import { useAppStore } from "../stores/useAppStore";
 
 interface JobWorkspaceProps {
   projectId: number;
 }
 
 export function JobWorkspace({ projectId }: JobWorkspaceProps) {
+  const { sendWithEnter } = useAppStore();
+  const isMac = useMemo(
+    () => navigator.platform.toLowerCase().includes("mac"),
+    [],
+  );
   const [jobs, setJobs] = useState<Job[]>([]);
   const [jobDetail, setJobDetail] = useState<JobDetail | null>(null);
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
@@ -41,7 +50,13 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
   const [confirming, setConfirming] = useState(false);
   const [appending, setAppending] = useState(false);
   const [message, setMessage] = useState<MessageType | null>(null);
+  const [fileSuggestions, setFileSuggestions] = useState<string[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [suggestionIndex, setSuggestionIndex] = useState(0);
+  const [mentionStart, setMentionStart] = useState(-1);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const suggestionsRef = useRef<HTMLDivElement | null>(null);
   const prevRoundRef = useRef<number>(0);
 
   const selectedJob = useMemo(
@@ -167,6 +182,22 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
     prevRoundRef.current = jobDetail?.job.clarificationRound ?? 0;
   }, [jobDetail?.job.clarificationRound]);
 
+  // 切换项目或选中 job 变化时，关闭之前 job 的 Pi Agent
+  const prevSelectedJobIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    const prev = prevSelectedJobIdRef.current;
+    if (prev !== null && prev !== selectedJobId) {
+      void closeJobAgent(prev);
+    }
+    prevSelectedJobIdRef.current = selectedJobId;
+
+    return () => {
+      if (selectedJobId !== null) {
+        void closeJobAgent(selectedJobId);
+      }
+    };
+  }, [selectedJobId]);
+
   // 自动滚动
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ block: "end" });
@@ -243,6 +274,141 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
       setAppending(false);
     }
   };
+
+  // ---- @ file mention autocomplete ----
+  const fetchSuggestions = useCallback(
+    async (query: string) => {
+      try {
+        const files = await fetchProjectFiles(projectId, query);
+        setFileSuggestions(files);
+        setSuggestionIndex(0);
+        setShowSuggestions(files.length > 0);
+      } catch {
+        setFileSuggestions([]);
+        setShowSuggestions(false);
+      }
+    },
+    [projectId],
+  );
+
+  const handleTextChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = event.target.value;
+    const cursor = event.target.selectionStart ?? value.length;
+    setRequirement(value);
+
+    // Find the nearest '@' before cursor
+    const beforeCursor = value.slice(0, cursor);
+    const atIndex = beforeCursor.lastIndexOf("@");
+    if (atIndex === -1) {
+      setShowSuggestions(false);
+      setMentionStart(-1);
+      return;
+    }
+
+    // Make sure there's no whitespace between '@' and cursor
+    const query = beforeCursor.slice(atIndex + 1);
+    if (/\s/.test(query)) {
+      setShowSuggestions(false);
+      setMentionStart(-1);
+      return;
+    }
+
+    setMentionStart(atIndex);
+    void fetchSuggestions(query);
+  };
+
+  const insertSuggestion = (filePath: string) => {
+    if (mentionStart === -1) return;
+    const before = requirement.slice(0, mentionStart);
+    const after = requirement.slice(
+      textareaRef.current?.selectionStart ?? requirement.length,
+    );
+    const next = `${before}@${filePath} ${after}`;
+    setRequirement(next);
+    setShowSuggestions(false);
+    setMentionStart(-1);
+    queueMicrotask(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      const pos = before.length + filePath.length + 2; // +2 for '@' and ' '
+      el.setSelectionRange(pos, pos);
+      el.focus();
+    });
+  };
+
+  const triggerSend = () => {
+    if (inputDisabled || !requirement.trim()) return;
+    if (canAppend) {
+      void handleAppendMessage();
+    } else {
+      void handleCreateJob();
+    }
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // 文件自动补全优先
+    if (showSuggestions && fileSuggestions.length > 0) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setSuggestionIndex((i) => (i + 1) % fileSuggestions.length);
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setSuggestionIndex(
+          (i) => (i - 1 + fileSuggestions.length) % fileSuggestions.length,
+        );
+      } else if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        const selected = fileSuggestions[suggestionIndex];
+        if (selected) insertSuggestion(selected);
+      } else if (event.key === "Escape") {
+        setShowSuggestions(false);
+      }
+      return;
+    }
+
+    // 发送快捷键
+    const isEnter = event.key === "Enter";
+    const isShiftEnter = isEnter && event.shiftKey;
+    const isPlainEnter =
+      isEnter && !event.shiftKey && !event.ctrlKey && !event.metaKey;
+    const isModifierEnter = isEnter && (event.ctrlKey || event.metaKey);
+
+    // Ctrl/Cmd+Enter 始终发送（跨平台备选）
+    if (isModifierEnter) {
+      event.preventDefault();
+      triggerSend();
+      return;
+    }
+
+    if (!sendWithEnter) {
+      // 默认模式: Enter 换行, Shift+Enter 发送
+      if (isShiftEnter) {
+        event.preventDefault();
+        triggerSend();
+      }
+    } else {
+      // 反转模式: Enter 发送, Shift+Enter 换行
+      if (isPlainEnter) {
+        event.preventDefault();
+        triggerSend();
+      }
+    }
+  };
+
+  // Close suggestions when clicking outside
+  useEffect(() => {
+    const handleClick = (event: MouseEvent) => {
+      if (
+        suggestionsRef.current?.contains(event.target as Node) ??
+        textareaRef.current?.contains(event.target as Node)
+      ) {
+        return;
+      }
+      setShowSuggestions(false);
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
 
   const updateAnswer = (
     clarificationId: number,
@@ -335,10 +501,39 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
     }
   };
 
-  // 当前是否有活跃 job 正在处理
+  const handleDeleteJob = async () => {
+    if (!selectedJob) return;
+    if (!window.confirm("确定要删除此会话吗？删除后无法恢复。")) {
+      return;
+    }
+
+    setMessage(null);
+    try {
+      await deleteJob(selectedJob.id);
+      setSelectedJobId(null);
+      setJobDetail(null);
+      setAnswers({});
+      setStreamMessages([]);
+      prevRoundRef.current = 0;
+      setRequirement("");
+      setMessage({ type: "success", text: "会话已删除" });
+      void loadJobs();
+    } catch (err) {
+      setMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "删除会话失败",
+      });
+    }
+  };
+
+  // 当前是否有活跃 job 正在处理或处于需要用户操作面板的状态
   const isProcessing = selectedJob?.status === "analyzing";
+  const isAwaitingUserAction =
+    selectedJob?.status === "clarifying" ||
+    selectedJob?.status === "draft_ready";
   const canAppend = selectedJob && selectedJob.status !== "archived";
-  const inputDisabled = creating || appending || isProcessing;
+  const inputDisabled =
+    creating || appending || isProcessing || isAwaitingUserAction;
 
   // 空状态：没有活跃 job
   const showEmptyState = activeJobs.length === 0 && !selectedJob;
@@ -370,6 +565,7 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
             <ChatHeader
               job={selectedJob}
               round={jobDetail.job.clarificationRound}
+              onClose={handleDeleteJob}
             />
             <AnalysisStepper
               events={streamMessages}
@@ -455,25 +651,68 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
               当前会话分析失败，补充说明后可继续分析，或清空输入框创建新会话。
             </p>
           )}
-          <div className="flex gap-3">
-            <textarea
-              value={requirement}
-              onChange={(event) => setRequirement(event.target.value)}
-              disabled={inputDisabled}
-              rows={2}
-              placeholder={
-                selectedJob?.status === "failed"
-                  ? "补充说明你的需求，将恢复并重新分析..."
-                  : canAppend
-                    ? "补充说明你的需求，Coordinator 会继续分析..."
-                    : "描述你的需求，Coordinator 会用聊天形式澄清并生成确认卡片..."
-              }
-              className="min-h-12 flex-1 resize-none rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-700 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-100 disabled:bg-slate-100 disabled:text-slate-400"
-            />
+          <div className="relative flex gap-3">
+            <div className="relative flex-1">
+              <textarea
+                ref={textareaRef}
+                value={requirement}
+                onChange={handleTextChange}
+                onKeyDown={handleKeyDown}
+                disabled={inputDisabled}
+                rows={2}
+                placeholder={
+                  selectedJob?.status === "failed"
+                    ? "补充说明你的需求，将恢复并重新分析..."
+                    : canAppend
+                      ? "补充说明你的需求，Coordinator 会继续分析..."
+                      : "描述你的需求，Coordinator 会用聊天形式澄清并生成确认卡片..."
+                }
+                className="min-h-12 w-full resize-none rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-700 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-100 disabled:bg-slate-100 disabled:text-slate-400"
+              />
+              <span className="absolute bottom-2 right-3 text-[10px] text-slate-400 pointer-events-none select-none">
+                {sendWithEnter
+                  ? isMac
+                    ? "⌘+Enter 发送"
+                    : "Ctrl+Enter 发送"
+                  : isMac
+                    ? "⇧+Enter 发送"
+                    : "Shift+Enter 发送"}
+              </span>
+              {showSuggestions && fileSuggestions.length > 0 && (
+                <div
+                  ref={suggestionsRef}
+                  className="absolute bottom-full left-0 mb-1 max-h-48 w-full overflow-y-auto rounded-lg border border-slate-200 bg-white py-1 shadow-lg"
+                >
+                  {fileSuggestions.map((file, index) => (
+                    <button
+                      key={file}
+                      type="button"
+                      onClick={() => insertSuggestion(file)}
+                      className={`w-full px-3 py-1.5 text-left text-xs ${
+                        index === suggestionIndex
+                          ? "bg-slate-100 text-slate-900"
+                          : "text-slate-700 hover:bg-slate-50"
+                      }`}
+                    >
+                      {file}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <button
               onClick={canAppend ? handleAppendMessage : handleCreateJob}
               disabled={inputDisabled || !requirement.trim()}
-              className="flex w-24 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-slate-900 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+              title={
+                sendWithEnter
+                  ? isMac
+                    ? "按 Enter 发送，Shift+Enter 换行"
+                    : "按 Enter 发送，Shift+Enter 换行"
+                  : isMac
+                    ? "按 ⇧+Enter 发送，Enter 换行"
+                    : "按 Shift+Enter 发送，Enter 换行"
+              }
+              className="flex w-24 shrink-0 items-center justify-center gap-1.5 self-stretch rounded-lg bg-slate-900 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {creating || appending ? (
                 <Loader2 className="h-4 w-4 animate-spin" />

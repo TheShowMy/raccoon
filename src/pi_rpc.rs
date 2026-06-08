@@ -20,7 +20,7 @@ pub struct PiRpcClient {
     stdin: Mutex<ChildStdin>,
     stdout_reader: Mutex<BufReader<ChildStdout>>,
     #[allow(dead_code)]
-    child: Child,
+    child: Mutex<Child>,
 }
 
 /// Pi Agent 返回的模型信息
@@ -97,13 +97,14 @@ impl PiRpcClient {
     /// 启动 `pi --mode rpc` 子进程并初始化客户端
     #[allow(dead_code)]
     pub async fn new(session_dir: impl AsRef<Path>) -> Result<Self> {
-        Self::new_with_extension(session_dir, None).await
+        Self::new_with_extension(session_dir, None, None).await
     }
 
     /// 启动 `pi --mode rpc` 子进程并加载可选扩展
     pub async fn new_with_extension(
         session_dir: impl AsRef<Path>,
         extension_path: Option<&Path>,
+        cwd: Option<&Path>,
     ) -> Result<Self> {
         let pi_path = find_pi_binary()?;
         let session_dir = session_dir.as_ref();
@@ -121,6 +122,11 @@ impl PiRpcClient {
         if let Some(ext) = extension_path {
             cmd.arg("--extension").arg(ext);
             info!("Loading pi extension: {}", ext.display());
+        }
+
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+            info!("Pi Agent working directory: {}", dir.display());
         }
 
         let mut child = cmd
@@ -143,7 +149,7 @@ impl PiRpcClient {
             io_lock: Mutex::new(()),
             stdin: Mutex::new(stdin),
             stdout_reader: Mutex::new(BufReader::new(stdout)),
-            child,
+            child: Mutex::new(child),
         };
 
         // Allow pi to finish initialization, then drain any startup noise
@@ -157,6 +163,16 @@ impl PiRpcClient {
     /// 获取独占会话锁。Coordinator 会跨多个 RPC 命令切换会话，必须串行执行。
     pub async fn session_guard(&self) -> MutexGuard<'_, ()> {
         self.session_lock.lock().await
+    }
+
+    /// 关闭 Pi Agent 子进程。
+    pub async fn shutdown(&self) -> Result<()> {
+        let mut child = self.child.lock().await;
+        child
+            .kill()
+            .await
+            .with_context(|| "Failed to kill pi agent child process")?;
+        Ok(())
     }
 
     /// 获取所有可用模型列表

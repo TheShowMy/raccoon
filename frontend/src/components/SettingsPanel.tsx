@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { X, Settings, Cpu, KeyRound } from "lucide-react";
+import { X, Settings, Cpu, KeyRound, Keyboard } from "lucide-react";
 import { useAppStore } from "../stores/useAppStore";
 import {
   fetchPiModels,
@@ -21,12 +21,13 @@ import { ModelsTab } from "./ModelsTab";
 import { WorkerTierModal } from "./WorkerTierModal";
 import { AlertCircle } from "lucide-react";
 
-type Tab = "models" | "auth";
+type Tab = "models" | "auth" | "preferences";
 
 type Message = { type: "success" | "error"; text: string };
 
 export function SettingsPanel() {
-  const { showSettings, closeSettings } = useAppStore();
+  const { showSettings, closeSettings, sendWithEnter, setSendWithEnter } =
+    useAppStore();
   const [activeTab, setActiveTab] = useState<Tab>("models");
 
   // Data
@@ -223,6 +224,17 @@ export function SettingsPanel() {
               <KeyRound className="w-4 h-4" />
               Provider 认证
             </button>
+            <button
+              onClick={() => setActiveTab("preferences")}
+              className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === "preferences"
+                  ? "border-amber-400 text-slate-900"
+                  : "border-transparent text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              <Keyboard className="w-4 h-4" />
+              偏好设置
+            </button>
           </div>
         </div>
 
@@ -255,6 +267,13 @@ export function SettingsPanel() {
           )}
 
           {activeTab === "auth" && <AuthTab />}
+
+          {activeTab === "preferences" && (
+            <PreferencesTab
+              sendWithEnter={sendWithEnter}
+              onToggle={setSendWithEnter}
+            />
+          )}
         </div>
       </div>
 
@@ -296,6 +315,72 @@ function AuthTab() {
         <p className="text-sm text-slate-400">
           Provider 认证管理功能即将推出...
         </p>
+      </div>
+    </div>
+  );
+}
+
+interface PreferencesTabProps {
+  sendWithEnter: boolean;
+  onToggle: (v: boolean) => void;
+}
+
+function PreferencesTab({ sendWithEnter, onToggle }: PreferencesTabProps) {
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start gap-2 bg-amber-50 rounded-lg p-3 border border-amber-100">
+        <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+        <div>
+          <p className="text-xs text-amber-700 font-medium">快捷键行为</p>
+          <p className="text-xs text-amber-600 mt-0.5">
+            自定义消息发送快捷键。默认 Shift+Enter 发送，Enter 换行。
+          </p>
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        <label className="flex items-center justify-between p-4 rounded-xl border border-slate-200 bg-white cursor-pointer hover:border-slate-300 transition-colors">
+          <div>
+            <p className="text-sm font-medium text-slate-900">Enter 发送消息</p>
+            <p className="text-xs text-slate-500 mt-0.5">
+              开启后按 Enter 直接发送，Shift+Enter 换行
+            </p>
+          </div>
+          <div
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              sendWithEnter ? "bg-amber-400" : "bg-slate-200"
+            }`}
+            onClick={() => onToggle(!sendWithEnter)}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                sendWithEnter ? "translate-x-6" : "translate-x-1"
+              }`}
+            />
+          </div>
+        </label>
+
+        <div className="bg-slate-50 rounded-xl p-4 border border-slate-100">
+          <p className="text-xs font-medium text-slate-700 mb-2">当前设置</p>
+          <div className="space-y-1.5 text-xs text-slate-500">
+            <div className="flex items-center gap-2">
+              <kbd className="px-1.5 py-0.5 bg-white border border-slate-200 rounded text-[10px] font-mono">
+                Enter
+              </kbd>
+              <span>→ {sendWithEnter ? "发送消息" : "换行"}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <kbd className="px-1.5 py-0.5 bg-white border border-slate-200 rounded text-[10px] font-mono">
+                Shift
+              </kbd>
+              <span>+</span>
+              <kbd className="px-1.5 py-0.5 bg-white border border-slate-200 rounded text-[10px] font-mono">
+                Enter
+              </kbd>
+              <span>→ {sendWithEnter ? "换行" : "发送消息"}</span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

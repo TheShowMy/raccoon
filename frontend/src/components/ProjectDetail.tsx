@@ -21,8 +21,8 @@ export function ProjectDetail({ project, onDelete }: ProjectDetailProps) {
   const [viewMode, setViewMode] = useState<"workspace" | "history">(
     "workspace",
   );
-  const repoPath = parseGitRepoUrl(project.git_url);
-  const host = parseGitHost(project.git_url);
+  const repoPath = parseGitRepoUrl(project.gitUrl);
+  const host = parseGitHost(project.gitUrl);
 
   const handleDelete = () => {
     if (confirm(`确定要删除项目「${project.name}」吗？`)) {
@@ -43,11 +43,11 @@ export function ProjectDetail({ project, onDelete }: ProjectDetailProps) {
               {project.name}
             </h1>
             <a
-              href={project.git_url}
+              href={project.gitUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-1 text-xs text-slate-400 transition-colors hover:text-amber-600"
-              title={project.git_url}
+              title={project.gitUrl}
             >
               <GitBranch className="h-3 w-3" />
               <span className="font-mono">{repoPath}</span>
@@ -58,7 +58,7 @@ export function ProjectDetail({ project, onDelete }: ProjectDetailProps) {
 
         <div className="flex items-center gap-1.5 shrink-0">
           <a
-            href={project.git_url}
+            href={project.gitUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-1 rounded-md p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"

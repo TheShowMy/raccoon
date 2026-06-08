@@ -22,6 +22,9 @@ frontend/.vite/
 # 打包输出（由 package 脚本生成）
 dist/
 
+#工作目录
+workspace/
+
 # 环境变量
 .env
 .env.local

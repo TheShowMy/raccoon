@@ -5,6 +5,23 @@ use tracing::warn;
 use crate::db::{ClarificationOption, ClarificationSeed, SystemConfig, TaskDraftSeed};
 use crate::pi_rpc::{PiRpcClient, RpcSessionState};
 
+/// Coordinator 分析时需要用到的项目上下文。
+#[derive(Debug, Clone)]
+pub struct ProjectContext {
+    pub name: String,
+    pub git_url: String,
+    pub local_path: String,
+}
+
+impl ProjectContext {
+    fn format_for_prompt(&self) -> String {
+        format!(
+            "- 项目名称：{}\n- Git 仓库：{}\n- 本地路径：{}\n",
+            self.name, self.git_url, self.local_path
+        )
+    }
+}
+
 const GENERATION_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +90,7 @@ pub async fn start_requirement_analysis(
     thinking_level: &str,
     requirement: &str,
     title: &str,
+    project_context: Option<&ProjectContext>,
 ) -> Result<CoordinatorDecision> {
     let _guard = pi_client.session_guard().await;
     let created = pi_client
@@ -90,7 +108,7 @@ pub async fn start_requirement_analysis(
         pi_client,
         system_config,
         thinking_level,
-        &build_initial_prompt(requirement),
+        &build_initial_prompt(requirement, project_context),
     )
     .await
 }
@@ -101,6 +119,7 @@ pub async fn continue_requirement_analysis(
     thinking_level: &str,
     session_file: &str,
     answer_summary: &str,
+    project_context: Option<&ProjectContext>,
 ) -> Result<CoordinatorDecision> {
     let _guard = pi_client.session_guard().await;
     let switched = pi_client
@@ -114,7 +133,7 @@ pub async fn continue_requirement_analysis(
         pi_client,
         system_config,
         thinking_level,
-        &build_followup_prompt(answer_summary),
+        &build_followup_prompt(answer_summary, project_context),
     )
     .await
 }
@@ -265,7 +284,20 @@ async fn try_parse_from_tool_result(
     Ok(None)
 }
 
-fn build_initial_prompt(requirement: &str) -> String {
+fn build_initial_prompt(requirement: &str, project_context: Option<&ProjectContext>) -> String {
+    let project_section = project_context
+        .map(|p| {
+            format!(
+                r#"## 项目上下文
+
+{}
+你当前的工作目录就是项目根目录。用户可能会使用 @path 引用项目中的文件（例如 @src/main.rs），当你遇到这类引用时，请使用文件读取工具查看对应文件的内容，以便结合项目实际情况进行分析。
+"#,
+                p.format_for_prompt()
+            )
+        })
+        .unwrap_or_default();
+
     format!(
         r#"你是 raccoon 的 Coordinator，负责把用户需求整理为后续执行前的确认需求。
 
@@ -276,6 +308,7 @@ fn build_initial_prompt(requirement: &str) -> String {
 - 如果目标、范围、验收方式已经足够明确，返回 status=ready，并生成 draft。
 - 如果仍有会影响实现路径或验收的关键不确定点，返回 status=needs_clarification，并生成 1 到 6 个澄清问题。
 
+{project_section}
 ## 输出 JSON 结构
 
 ```json
@@ -348,11 +381,25 @@ fn build_initial_prompt(requirement: &str) -> String {
     )
 }
 
-fn build_followup_prompt(answer_summary: &str) -> String {
+fn build_followup_prompt(answer_summary: &str, project_context: Option<&ProjectContext>) -> String {
+    let project_section = project_context
+        .map(|p| {
+            format!(
+                r#"
+## 项目上下文
+
+{}
+你当前的工作目录就是项目根目录。用户可能会使用 @path 引用项目中的文件（例如 @src/main.rs），当你遇到这类引用时，请使用文件读取工具查看对应文件的内容，以便结合项目实际情况进行分析。
+"#,
+                p.format_for_prompt()
+            )
+        })
+        .unwrap_or_default();
+
     format!(
         r#"用户已经回答了上一轮澄清问题：
 {answer_summary}
-
+{project_section}
 请基于当前完整上下文继续判断：
 - 如果仍有关键不确定点，返回 status=needs_clarification，并给出 1 到 6 个新的澄清问题。
 - 如果需求已经足够清楚，返回 status=ready，并生成 draft。

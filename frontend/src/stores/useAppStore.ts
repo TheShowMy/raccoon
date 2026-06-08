@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 const STORAGE_KEY = "raccoon:currentProjectId";
+const SEND_WITH_ENTER_KEY = "raccoon:sendWithEnter";
 
 function loadStoredProjectId(): number | null {
   try {
@@ -25,6 +26,23 @@ function saveStoredProjectId(id: number | null) {
   }
 }
 
+function loadSendWithEnter(): boolean {
+  try {
+    const raw = localStorage.getItem(SEND_WITH_ENTER_KEY);
+    return raw === "true";
+  } catch {
+    return false;
+  }
+}
+
+function saveSendWithEnter(value: boolean) {
+  try {
+    localStorage.setItem(SEND_WITH_ENTER_KEY, String(value));
+  } catch {
+    // ignore localStorage errors
+  }
+}
+
 function resolveCurrentProjectId(
   projects: Project[],
   preferredId: number | null,
@@ -43,8 +61,12 @@ function resolveCurrentProjectId(
 export interface Project {
   id: number;
   name: string;
-  git_url: string;
-  created_at: string;
+  gitUrl: string;
+  localPath?: string | null;
+  cloneStatus?: "pending" | "cloning" | "ready" | "failed" | string;
+  cloneError?: string | null;
+  lastSyncedAt?: string | null;
+  createdAt: string;
 }
 
 interface AppState {
@@ -53,6 +75,7 @@ interface AppState {
   currentProjectId: number | null;
   showAddModal: boolean;
   showSettings: boolean;
+  sendWithEnter: boolean;
 
   setPiInstalled: (v: boolean) => void;
   setProjects: (p: Project[]) => void;
@@ -63,6 +86,7 @@ interface AppState {
   closeAddModal: () => void;
   openSettings: () => void;
   closeSettings: () => void;
+  setSendWithEnter: (v: boolean) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -71,6 +95,7 @@ export const useAppStore = create<AppState>((set) => ({
   currentProjectId: null,
   showAddModal: false,
   showSettings: false,
+  sendWithEnter: loadSendWithEnter(),
 
   setPiInstalled: (v) => set({ piInstalled: v }),
 
@@ -118,4 +143,8 @@ export const useAppStore = create<AppState>((set) => ({
   closeAddModal: () => set({ showAddModal: false }),
   openSettings: () => set({ showSettings: true }),
   closeSettings: () => set({ showSettings: false }),
+  setSendWithEnter: (v) => {
+    saveSendWithEnter(v);
+    set({ sendWithEnter: v });
+  },
 }));

@@ -39,10 +39,15 @@ pub struct TaskThinkingPolicy {
 // ===== Project =====
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: i64,
     pub name: String,
     pub git_url: String,
+    pub local_path: Option<String>,
+    pub clone_status: Option<String>,
+    pub clone_error: Option<String>,
+    pub last_synced_at: Option<String>,
     pub created_at: String,
 }
 
@@ -251,11 +256,21 @@ pub async fn init_db() -> Result<Pool<Sqlite>> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             git_url TEXT NOT NULL,
+            local_path TEXT,
+            clone_status TEXT DEFAULT 'pending',
+            clone_error TEXT,
+            last_synced_at DATETIME,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
     )
     .execute(&pool)
     .await?;
+
+    // Migrate existing projects table
+    add_column_if_missing(&pool, "projects", "local_path", "TEXT").await?;
+    add_column_if_missing(&pool, "projects", "clone_status", "TEXT DEFAULT 'pending'").await?;
+    add_column_if_missing(&pool, "projects", "clone_error", "TEXT").await?;
+    add_column_if_missing(&pool, "projects", "last_synced_at", "DATETIME").await?;
 
     // Create jobs table
     sqlx::query(
@@ -590,12 +605,25 @@ pub async fn get_task_thinking_level(pool: &Pool<Sqlite>, task_type: &str) -> Re
 
 pub async fn get_projects(pool: &Pool<Sqlite>) -> Result<Vec<Project>> {
     let projects = sqlx::query_as::<_, Project>(
-        "SELECT id, name, git_url, created_at FROM projects ORDER BY created_at DESC",
+        "SELECT id, name, git_url, local_path, clone_status, clone_error, last_synced_at, created_at
+         FROM projects ORDER BY created_at DESC",
     )
     .fetch_all(pool)
     .await?;
 
     Ok(projects)
+}
+
+pub async fn get_project(pool: &Pool<Sqlite>, project_id: i64) -> Result<Project> {
+    let project = sqlx::query_as::<_, Project>(
+        "SELECT id, name, git_url, local_path, clone_status, clone_error, last_synced_at, created_at
+         FROM projects WHERE id = $1",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(project)
 }
 
 pub async fn create_project(pool: &Pool<Sqlite>, name: &str, git_url: &str) -> Result<Project> {
@@ -607,13 +635,39 @@ pub async fn create_project(pool: &Pool<Sqlite>, name: &str, git_url: &str) -> R
         .last_insert_rowid();
 
     let project = sqlx::query_as::<_, Project>(
-        "SELECT id, name, git_url, created_at FROM projects WHERE id = $1",
+        "SELECT id, name, git_url, local_path, clone_status, clone_error, last_synced_at, created_at
+         FROM projects WHERE id = $1",
     )
     .bind(id)
     .fetch_one(pool)
     .await?;
 
     Ok(project)
+}
+
+pub async fn update_project_clone_status(
+    pool: &Pool<Sqlite>,
+    project_id: i64,
+    local_path: Option<&str>,
+    clone_status: &str,
+    clone_error: Option<&str>,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE projects
+         SET local_path = $1,
+             clone_status = $2,
+             clone_error = $3,
+             last_synced_at = datetime('now')
+         WHERE id = $4",
+    )
+    .bind(local_path)
+    .bind(clone_status)
+    .bind(clone_error)
+    .bind(project_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn delete_project(pool: &Pool<Sqlite>, id: i64) -> Result<bool> {
@@ -925,6 +979,14 @@ pub async fn confirm_job(pool: &Pool<Sqlite>, job_id: i64) -> Result<JobDetail> 
     insert_job_message(pool, job_id, "system", "需求已确认，当前澄清会话已归档。").await?;
 
     get_job_detail(pool, job_id).await
+}
+
+pub async fn delete_job(pool: &Pool<Sqlite>, job_id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM jobs WHERE id = $1")
+        .bind(job_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn set_job_failed(pool: &Pool<Sqlite>, job_id: i64, reason: &str) -> Result<()> {
