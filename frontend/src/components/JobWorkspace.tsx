@@ -12,7 +12,6 @@ import {
   submitClarifications,
 } from "../api/client";
 import type { Job, JobDetail } from "../api/client";
-import { AnalysisStepper } from "./job/AnalysisStepper";
 import { ChatHeader } from "./job/ChatHeader";
 import { ClarificationWizard } from "./job/ClarificationWizard";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -566,7 +565,7 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
         </div>
       )}
 
-      {/* 顶部固定：Header + 分析进度 */}
+      {/* 顶部固定：Header */}
       {selectedJob && jobDetail && (
         <div className="shrink-0 border-b border-slate-50 px-5 pt-3 pb-2">
           <div className="mx-auto w-full max-w-3xl">
@@ -574,10 +573,6 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
               job={selectedJob}
               round={jobDetail.job.clarificationRound}
               onClose={handleDeleteJob}
-            />
-            <AnalysisStepper
-              events={streamMessages}
-              isActive={selectedJob.status === "analyzing"}
             />
           </div>
         </div>
@@ -648,11 +643,6 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
       {/* 底部固定：输入框 */}
       <div className="shrink-0 border-t border-slate-100 bg-white px-5 py-3">
         <div className="mx-auto w-full max-w-3xl">
-          {isProcessing && (
-            <p className="mb-1.5 text-xs text-slate-400">
-              Coordinator 正在分析当前需求，请稍候...
-            </p>
-          )}
           {selectedJob?.status === "failed" && (
             <p className="mb-1.5 text-xs text-rose-500">
               ⚠️

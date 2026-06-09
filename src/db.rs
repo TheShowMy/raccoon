@@ -1110,6 +1110,21 @@ async fn insert_job_message_with_metadata(
     Ok(())
 }
 
+pub async fn insert_job_trace_message(
+    pool: &Pool<Sqlite>,
+    job_id: i64,
+    metadata: &serde_json::Value,
+) -> Result<()> {
+    insert_job_message_with_metadata(
+        pool,
+        job_id,
+        "trace",
+        "Coordinator 运行过程",
+        Some(metadata),
+    )
+    .await
+}
+
 /// 向已有 Job 追加用户消息，并在需要时将状态恢复为 analyzing
 pub async fn append_job_message(
     pool: &Pool<Sqlite>,

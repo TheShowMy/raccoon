@@ -25,6 +25,28 @@ export interface StreamEvent {
   payload?: unknown;
 }
 
+export interface TraceTool {
+  toolCallId: string;
+  toolName: string;
+  status: "running" | "done" | "error" | string;
+  output: string;
+  isError?: boolean;
+}
+
+export interface TraceStatus {
+  type: string;
+  message: string;
+}
+
+export interface TraceData {
+  thinking: string;
+  output: string;
+  tools: TraceTool[];
+  statuses: TraceStatus[];
+  completed: boolean;
+  live: boolean;
+}
+
 export const OTHER_VALUE = "__other__";
 
 export interface StatusConfig {

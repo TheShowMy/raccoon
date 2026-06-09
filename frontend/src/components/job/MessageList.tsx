@@ -1,5 +1,6 @@
-import { Loader2 } from "lucide-react";
 import type { JobMessage, StreamEvent } from "./types";
+import { TraceBubble } from "./TraceBubble";
+import { buildRuntimeTrace, traceFromMessage } from "./traceRuntime";
 
 interface MessageListProps {
   messages: JobMessage[];
@@ -12,7 +13,7 @@ export function MessageList({
   streamMessages,
   analyzing,
 }: MessageListProps) {
-  // 过滤掉已显示在 AnalysisStepper 中的 progress 事件
+  const runtimeTrace = buildRuntimeTrace(streamMessages, analyzing);
   const displayEvents = streamMessages.filter(
     (e) =>
       e.event !== "coordinator_started" &&
@@ -21,16 +22,25 @@ export function MessageList({
   );
 
   // 如果没有历史消息和流消息，不渲染
-  if (messages.length === 0 && displayEvents.length === 0 && !analyzing) {
+  if (
+    messages.length === 0 &&
+    displayEvents.length === 0 &&
+    !runtimeTrace &&
+    !analyzing
+  ) {
     return null;
   }
 
   return (
     <div className="space-y-3">
       {/* 历史消息 */}
-      {messages.map((message) => (
-        <ChatBubble key={message.id} message={message} />
-      ))}
+      {messages.map((message) => {
+        const trace = traceFromMessage(message);
+        if (trace) {
+          return <TraceBubble key={message.id} trace={trace} />;
+        }
+        return <ChatBubble key={message.id} message={message} />;
+      })}
 
       {/* 实时流事件（非 progress 类型） */}
       {displayEvents.map((message, index) => (
@@ -40,13 +50,7 @@ export function MessageList({
         />
       ))}
 
-      {/* 分析中指示器 */}
-      {analyzing && (
-        <div className="flex items-center gap-2 text-sm text-slate-400">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Coordinator 正在分析...
-        </div>
-      )}
+      {runtimeTrace && <TraceBubble trace={runtimeTrace} />}
     </div>
   );
 }

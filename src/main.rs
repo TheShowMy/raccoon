@@ -1180,7 +1180,11 @@ async fn run_initial_analysis(
 ) -> Result<()> {
     let thinking_level = get_requirement_thinking_level(pool).await;
     let project_ctx = build_project_context(pool, project_id).await.ok();
-    let mut pi_event_sink = |event| emit_pi_job_event(event_tx, job_id, event);
+    let mut pi_events = Vec::new();
+    let mut pi_event_sink = |event: Value| {
+        pi_events.push(event.clone());
+        emit_pi_job_event(event_tx, job_id, event);
+    };
     let decision = coordinator::start_requirement_analysis(
         pi_client,
         &system_config,
@@ -1199,6 +1203,7 @@ async fn run_initial_analysis(
         decision.session.session_file.as_deref(),
     )
     .await?;
+    persist_pi_trace(pool, job_id, &pi_events).await?;
     apply_coordinator_decision(pool, event_tx, job_id, decision).await
 }
 
@@ -1246,7 +1251,11 @@ async fn run_followup_analysis(
     let system_config = db::get_system_config(pool).await?;
     let thinking_level = get_requirement_thinking_level(pool).await;
     let project_ctx = build_project_context(pool, project_id).await.ok();
-    let mut pi_event_sink = |event| emit_pi_job_event(event_tx, job_id, event);
+    let mut pi_events = Vec::new();
+    let mut pi_event_sink = |event: Value| {
+        pi_events.push(event.clone());
+        emit_pi_job_event(event_tx, job_id, event);
+    };
     let decision = coordinator::continue_requirement_analysis(
         pi_client,
         &system_config,
@@ -1258,6 +1267,7 @@ async fn run_followup_analysis(
     )
     .await?;
 
+    persist_pi_trace(pool, job_id, &pi_events).await?;
     apply_coordinator_decision(pool, event_tx, job_id, decision).await
 }
 
@@ -1321,6 +1331,159 @@ fn emit_job_event(event_tx: &EventSender, job_id: i64, event: &str, message: &st
         pi_type: None,
         payload: None,
     });
+}
+
+async fn persist_pi_trace(pool: &Pool<Sqlite>, job_id: i64, events: &[Value]) -> Result<()> {
+    if let Some(metadata) = build_pi_trace_metadata(events) {
+        db::insert_job_trace_message(pool, job_id, &metadata).await?;
+    }
+    Ok(())
+}
+
+fn build_pi_trace_metadata(events: &[Value]) -> Option<Value> {
+    if events.is_empty() {
+        return None;
+    }
+
+    let mut thinking = String::new();
+    let mut output = String::new();
+    let mut statuses: Vec<Value> = Vec::new();
+    let mut tools: Vec<Value> = Vec::new();
+
+    for event in events {
+        let pi_type = event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match pi_type {
+            "message_update" => collect_message_update(event, &mut thinking, &mut output),
+            "tool_execution_start" | "tool_execution_update" | "tool_execution_end" => {
+                upsert_trace_tool(&mut tools, event, pi_type)
+            }
+            "agent_start" | "agent_end" | "turn_start" | "turn_end" | "auto_retry_start"
+            | "auto_retry_end" | "compaction_start" | "compaction_end" | "extension_error" => {
+                statuses.push(json!({
+                    "type": pi_type,
+                    "message": summarize_pi_event(pi_type, event),
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    let summary = json!({
+        "thinkingChars": thinking.chars().count(),
+        "outputChars": output.chars().count(),
+        "toolCount": tools.len(),
+        "statusCount": statuses.len(),
+    });
+
+    Some(json!({
+        "type": "pi_trace",
+        "version": 1,
+        "summary": summary,
+        "trace": {
+            "thinking": thinking,
+            "output": output,
+            "tools": tools,
+            "statuses": statuses,
+        }
+    }))
+}
+
+fn collect_message_update(event: &Value, thinking: &mut String, output: &mut String) {
+    let assistant_event = match event.get("assistantMessageEvent") {
+        Some(Value::Object(_)) => &event["assistantMessageEvent"],
+        _ => return,
+    };
+    let delta_type = assistant_event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let delta = assistant_event
+        .get("delta")
+        .or_else(|| assistant_event.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match delta_type {
+        "thinking_delta" => thinking.push_str(delta),
+        "text_delta" => output.push_str(delta),
+        _ => {}
+    }
+}
+
+fn upsert_trace_tool(tools: &mut Vec<Value>, event: &Value, pi_type: &str) {
+    let tool_call_id = event
+        .get("toolCallId")
+        .or_else(|| event.get("tool_call_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let existing_index = tools.iter().position(|tool| {
+        tool.get("toolCallId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id == tool_call_id)
+    });
+    let tool_name = event
+        .get("toolName")
+        .or_else(|| event.get("tool_name"))
+        .and_then(Value::as_str)
+        .unwrap_or("tool");
+    let status = match pi_type {
+        "tool_execution_start" => "running",
+        "tool_execution_update" => "running",
+        "tool_execution_end" => "done",
+        _ => "unknown",
+    };
+    let content = extract_tool_text(event);
+    let is_error = event
+        .get("isError")
+        .or_else(|| event.get("is_error"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let mut tool = existing_index
+        .and_then(|index| tools.get(index).cloned())
+        .unwrap_or_else(|| {
+            json!({
+                "toolCallId": tool_call_id,
+                "toolName": tool_name,
+                "status": status,
+                "output": "",
+                "isError": false,
+            })
+        });
+
+    tool["toolName"] = json!(tool_name);
+    tool["status"] = json!(status);
+    tool["isError"] = json!(is_error);
+    if let Some(content) = content {
+        tool["output"] = json!(content);
+    }
+
+    if let Some(index) = existing_index {
+        tools[index] = tool;
+    } else {
+        tools.push(tool);
+    }
+}
+
+fn extract_tool_text(event: &Value) -> Option<String> {
+    let result = event
+        .get("partialResult")
+        .or_else(|| event.get("partial_result"))
+        .or_else(|| event.get("result"))?;
+    result
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|text| !text.is_empty())
 }
 
 fn emit_pi_job_event(event_tx: &EventSender, job_id: i64, payload: Value) {
@@ -1922,5 +2085,42 @@ mod tests {
             summarize_pi_event("message_update", &payload),
             "正在生成回复文本。"
         );
+    }
+
+    #[test]
+    fn builds_pi_trace_metadata_from_stream_events() {
+        let events = vec![
+            json!({
+                "type": "message_update",
+                "assistantMessageEvent": { "type": "thinking_delta", "delta": "先理解需求。" }
+            }),
+            json!({
+                "type": "tool_execution_start",
+                "toolCallId": "call-1",
+                "toolName": "bash"
+            }),
+            json!({
+                "type": "tool_execution_update",
+                "toolCallId": "call-1",
+                "toolName": "bash",
+                "partialResult": {
+                    "content": [{ "type": "text", "text": "cargo test" }]
+                }
+            }),
+            json!({
+                "type": "message_update",
+                "assistantMessageEvent": { "type": "text_delta", "delta": "{\"status\":\"ready\"}" }
+            }),
+            json!({ "type": "agent_end" }),
+        ];
+
+        let metadata = build_pi_trace_metadata(&events).unwrap();
+
+        assert_eq!(metadata["type"], "pi_trace");
+        assert_eq!(metadata["trace"]["thinking"], "先理解需求。");
+        assert_eq!(metadata["trace"]["output"], "{\"status\":\"ready\"}");
+        assert_eq!(metadata["trace"]["tools"][0]["toolName"], "bash");
+        assert_eq!(metadata["trace"]["tools"][0]["output"], "cargo test");
+        assert_eq!(metadata["summary"]["toolCount"], 1);
     }
 }
