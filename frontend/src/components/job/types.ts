@@ -21,6 +21,8 @@ export interface StreamEvent {
   jobId: number;
   event: string;
   message: string;
+  piType?: string;
+  payload?: unknown;
 }
 
 export const OTHER_VALUE = "__other__";

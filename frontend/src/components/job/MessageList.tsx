@@ -15,7 +15,9 @@ export function MessageList({
   // 过滤掉已显示在 AnalysisStepper 中的 progress 事件
   const displayEvents = streamMessages.filter(
     (e) =>
-      e.event !== "coordinator_started" && e.event !== "coordinator_progress",
+      e.event !== "coordinator_started" &&
+      e.event !== "coordinator_progress" &&
+      e.event !== "pi_event",
   );
 
   // 如果没有历史消息和流消息，不渲染

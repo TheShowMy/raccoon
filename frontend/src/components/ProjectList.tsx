@@ -1,9 +1,13 @@
-import { Trash2, GitBranch } from "lucide-react";
+import { Trash2, GitBranch, FolderGit } from "lucide-react";
 import { deleteProject } from "../api/client";
 import { useAppStore } from "../stores/useAppStore";
 import { parseGitRepoUrl, formatRelativeTime } from "../utils/format";
 
-export function ProjectList() {
+interface ProjectListProps {
+  collapsed?: boolean;
+}
+
+export function ProjectList({ collapsed = false }: ProjectListProps) {
   const { projects, currentProjectId, setCurrentProject, removeProject } =
     useAppStore();
 
@@ -20,9 +24,50 @@ export function ProjectList() {
 
   if (projects.length === 0) {
     return (
-      <div className="px-5 py-8 text-center">
-        <p className="text-sm text-slate-400">暂无项目</p>
-        <p className="text-xs text-slate-300 mt-1">点击上方按钮添加</p>
+      <div className={`py-8 text-center ${collapsed ? "px-2" : "px-5"}`}>
+        {collapsed ? (
+          <FolderGit className="mx-auto h-5 w-5 text-slate-300" />
+        ) : (
+          <>
+            <p className="text-sm text-slate-400">暂无项目</p>
+            <p className="text-xs text-slate-300 mt-1">点击上方按钮添加</p>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  if (collapsed) {
+    return (
+      <div className="flex-1 overflow-y-auto px-2 py-2">
+        {projects.map((project) => {
+          const isActive = currentProjectId === project.id;
+          const isProblem = project.cloneStatus === "failed";
+          const isBusy =
+            project.cloneStatus === "pending" ||
+            project.cloneStatus === "cloning";
+          return (
+            <button
+              key={project.id}
+              onClick={() => setCurrentProject(project.id)}
+              className={`relative mb-1.5 flex h-10 w-full items-center justify-center rounded-lg border transition ${
+                isActive
+                  ? "border-amber-200 bg-white text-slate-900 shadow-sm"
+                  : "border-transparent text-slate-500 hover:bg-white/70"
+              }`}
+              title={project.name}
+            >
+              <FolderGit className="h-4 w-4" />
+              {(isBusy || isProblem) && (
+                <span
+                  className={`absolute right-1.5 top-1.5 h-2 w-2 rounded-full ${
+                    isProblem ? "bg-rose-500" : "bg-amber-400"
+                  }`}
+                />
+              )}
+            </button>
+          );
+        })}
       </div>
     );
   }
@@ -35,9 +80,17 @@ export function ProjectList() {
         const createdAt = formatRelativeTime(project.createdAt);
 
         return (
-          <button
+          <div
             key={project.id}
+            role="button"
+            tabIndex={0}
             onClick={() => setCurrentProject(project.id)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                setCurrentProject(project.id);
+              }
+            }}
             className={`w-full text-left rounded-xl mb-1.5 group flex items-start gap-2 px-3 py-2.5 transition-all ${
               isActive
                 ? "bg-white shadow-sm border-l-2 border-l-amber-400 border-y border-r border-slate-200"
@@ -101,7 +154,7 @@ export function ProjectList() {
             >
               <Trash2 className="w-3.5 h-3.5" />
             </button>
-          </button>
+          </div>
         );
       })}
     </div>

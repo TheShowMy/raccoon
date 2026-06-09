@@ -14,7 +14,7 @@ use sqlx::{Pool, Sqlite};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::broadcast;
@@ -29,6 +29,7 @@ mod pi_rpc;
 const PORT: u16 = 3003;
 
 type EventSender = broadcast::Sender<JobEvent>;
+type ProjectEventSender = broadcast::Sender<ProjectEvent>;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +37,19 @@ struct JobEvent {
     job_id: i64,
     event: String,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pi_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectEvent {
+    project_id: i64,
+    event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<db::Project>,
 }
 
 /// 全局应用状态，包含数据库连接、Pi Agent 进程池、事件广播等。
@@ -48,6 +62,7 @@ struct AppState {
     pi_session_dir: PathBuf,
     extension_path: Option<PathBuf>,
     event_tx: EventSender,
+    project_event_tx: ProjectEventSender,
 }
 
 impl AppState {
@@ -206,6 +221,7 @@ async fn main() -> Result<()> {
     };
 
     let (event_tx, _) = broadcast::channel(256);
+    let (project_event_tx, _) = broadcast::channel(256);
     let state = Arc::new(AppState {
         pool: pool.clone(),
         default_pi_client: pi_client.clone(),
@@ -214,6 +230,7 @@ async fn main() -> Result<()> {
         pi_session_dir: pi_session_dir.clone(),
         extension_path: extension_path.clone(),
         event_tx: event_tx.clone(),
+        project_event_tx: project_event_tx.clone(),
     });
     let app = create_router(state);
 
@@ -234,6 +251,7 @@ fn create_router(state: Arc<AppState>) -> Router {
             "/api/projects",
             get(list_projects_handler).post(create_project_handler),
         )
+        .route("/api/projects/events", get(project_events_handler))
         .route(
             "/api/projects/:id/jobs",
             get(list_project_jobs_handler).post(create_job_handler),
@@ -369,6 +387,7 @@ async fn create_project_handler(
             let name = req.name.trim().to_string();
             let workspace = state.workspace_dir.clone();
             let pool_clone = state.pool.clone();
+            let project_event_tx = state.project_event_tx.clone();
             tokio::spawn(async move {
                 let safe_name = name
                     .to_lowercase()
@@ -386,8 +405,29 @@ async fn create_project_handler(
                         Some(&format!("创建工作区目录失败: {}", e)),
                     )
                     .await;
+                    emit_project_event_from_db(
+                        &pool_clone,
+                        &project_event_tx,
+                        project_id,
+                        "clone_failed",
+                    )
+                    .await;
                     return;
                 }
+
+                if let Err(e) =
+                    db::update_project_clone_status(&pool_clone, project_id, None, "cloning", None)
+                        .await
+                {
+                    warn!("更新项目克隆开始状态失败: {}", e);
+                }
+                emit_project_event_from_db(
+                    &pool_clone,
+                    &project_event_tx,
+                    project_id,
+                    "clone_started",
+                )
+                .await;
 
                 let output = tokio::process::Command::new("git")
                     .arg("clone")
@@ -412,6 +452,13 @@ async fn create_project_handler(
                         } else {
                             info!("项目 {} 克隆完成: {}", project_id, local_path);
                         }
+                        emit_project_event_from_db(
+                            &pool_clone,
+                            &project_event_tx,
+                            project_id,
+                            "clone_ready",
+                        )
+                        .await;
                     }
                     Ok(out) => {
                         let err = String::from_utf8_lossy(&out.stderr).to_string();
@@ -424,6 +471,13 @@ async fn create_project_handler(
                             Some(&err),
                         )
                         .await;
+                        emit_project_event_from_db(
+                            &pool_clone,
+                            &project_event_tx,
+                            project_id,
+                            "clone_failed",
+                        )
+                        .await;
                     }
                     Err(e) => {
                         warn!("执行 git clone 失败: {}", e);
@@ -433,6 +487,13 @@ async fn create_project_handler(
                             None,
                             "failed",
                             Some(&format!("执行 git clone 失败: {}", e)),
+                        )
+                        .await;
+                        emit_project_event_from_db(
+                            &pool_clone,
+                            &project_event_tx,
+                            project_id,
+                            "clone_failed",
                         )
                         .await;
                     }
@@ -588,6 +649,129 @@ fn collect_text_files(
     Ok(())
 }
 
+async fn delete_job_with_local_cleanup(state: &AppState, job_id: i64) -> anyhow::Result<()> {
+    let job = db::get_job(&state.pool, job_id).await?;
+    if let Some(session_file) = job.coordinator_session_file.as_deref() {
+        validate_session_file_path(&state.pi_session_dir, FsPath::new(session_file))?;
+    }
+
+    state.shutdown_job_pi_client(job_id).await;
+    db::delete_job(&state.pool, job_id).await?;
+
+    if let Some(session_file) = job.coordinator_session_file.as_deref() {
+        remove_session_file_if_exists(&state.pi_session_dir, FsPath::new(session_file)).await?;
+    }
+
+    Ok(())
+}
+
+async fn delete_project_with_local_cleanup(
+    state: &AppState,
+    project_id: i64,
+) -> anyhow::Result<bool> {
+    let project = db::get_project(&state.pool, project_id).await?;
+    let jobs = db::get_project_jobs(&state.pool, project_id, true).await?;
+    let session_files: Vec<PathBuf> = jobs
+        .iter()
+        .filter_map(|job| job.coordinator_session_file.as_deref())
+        .map(PathBuf::from)
+        .collect();
+
+    for session_file in &session_files {
+        validate_session_file_path(&state.pi_session_dir, session_file)?;
+    }
+    if let Some(local_path) = project.local_path.as_deref() {
+        validate_project_dir_path(&state.workspace_dir, project_id, FsPath::new(local_path))?;
+    }
+
+    for job in &jobs {
+        state.shutdown_job_pi_client(job.id).await;
+    }
+
+    let deleted = db::delete_project(&state.pool, project_id).await?;
+    if deleted {
+        for session_file in &session_files {
+            remove_session_file_if_exists(&state.pi_session_dir, session_file).await?;
+        }
+        if let Some(local_path) = project.local_path.as_deref() {
+            remove_project_dir_if_exists(&state.workspace_dir, project_id, FsPath::new(local_path))
+                .await?;
+        }
+        emit_project_event(&state.project_event_tx, project_id, "project_deleted", None);
+    }
+
+    Ok(deleted)
+}
+
+fn validate_session_file_path(session_dir: &FsPath, path: &FsPath) -> anyhow::Result<()> {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+        anyhow::bail!("拒绝删除非 JSONL 会话文件: {}", path.display());
+    }
+    if !path.exists() {
+        return Ok(());
+    }
+    ensure_existing_child_path(session_dir, path)
+        .with_context(|| format!("拒绝删除 pi-sessions 外部文件: {}", path.display()))
+}
+
+fn validate_project_dir_path(
+    workspace_dir: &FsPath,
+    project_id: i64,
+    path: &FsPath,
+) -> anyhow::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let expected_prefix = format!("project-{project_id}-");
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    anyhow::ensure!(
+        file_name.starts_with(&expected_prefix),
+        "拒绝删除名称不匹配的项目目录: {}",
+        path.display()
+    );
+    anyhow::ensure!(path.is_dir(), "项目本地路径不是目录: {}", path.display());
+    ensure_existing_child_path(workspace_dir, path)
+        .with_context(|| format!("拒绝删除 workspace 外部目录: {}", path.display()))
+}
+
+fn ensure_existing_child_path(root: &FsPath, path: &FsPath) -> anyhow::Result<()> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("根目录不存在: {}", root.display()))?;
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("路径不存在: {}", path.display()))?;
+    anyhow::ensure!(path.starts_with(&root), "路径不在允许的根目录内");
+    Ok(())
+}
+
+async fn remove_session_file_if_exists(session_dir: &FsPath, path: &FsPath) -> anyhow::Result<()> {
+    validate_session_file_path(session_dir, path)?;
+    if path.exists() {
+        tokio::fs::remove_file(path)
+            .await
+            .with_context(|| format!("删除 Pi 会话文件失败: {}", path.display()))?;
+    }
+    Ok(())
+}
+
+async fn remove_project_dir_if_exists(
+    workspace_dir: &FsPath,
+    project_id: i64,
+    path: &FsPath,
+) -> anyhow::Result<()> {
+    validate_project_dir_path(workspace_dir, project_id, path)?;
+    if path.exists() {
+        tokio::fs::remove_dir_all(path)
+            .await
+            .with_context(|| format!("删除项目本地目录失败: {}", path.display()))?;
+    }
+    Ok(())
+}
+
 async fn reclone_project_handler(
     Extension(_state): Extension<Arc<AppState>>,
     Path(_id): Path<i64>,
@@ -599,7 +783,7 @@ async fn delete_project_handler(
     Extension(state): Extension<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Json<ApiResponse<bool>> {
-    match db::delete_project(&state.pool, id).await {
+    match delete_project_with_local_cleanup(&state, id).await {
         Ok(deleted) => Json(ApiResponse::ok(deleted)),
         Err(e) => {
             warn!("删除项目失败: {}", e);
@@ -786,10 +970,9 @@ async fn delete_job_handler(
     Extension(state): Extension<Arc<AppState>>,
     Path(job_id): Path<i64>,
 ) -> Json<ApiResponse<bool>> {
-    match db::delete_job(&state.pool, job_id).await {
+    match delete_job_with_local_cleanup(&state, job_id).await {
         Ok(()) => {
             emit_job_event(&state.event_tx, job_id, "deleted", "会话已删除。");
-            state.shutdown_job_pi_client(job_id).await;
             Json(ApiResponse::ok(true))
         }
         Err(e) => {
@@ -866,6 +1049,22 @@ async fn job_events_handler(
                 .map(|data| Ok(Event::default().event(event.event).data(data))),
             _ => None,
         });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+async fn project_events_handler(
+    Extension(state): Extension<Arc<AppState>>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let stream =
+        BroadcastStream::new(state.project_event_tx.subscribe()).filter_map(
+            move |item| match item {
+                Ok(event) => serde_json::to_string(&event)
+                    .ok()
+                    .map(|data| Ok(Event::default().event(event.event).data(data))),
+                _ => None,
+            },
+        );
 
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
@@ -981,6 +1180,7 @@ async fn run_initial_analysis(
 ) -> Result<()> {
     let thinking_level = get_requirement_thinking_level(pool).await;
     let project_ctx = build_project_context(pool, project_id).await.ok();
+    let mut pi_event_sink = |event| emit_pi_job_event(event_tx, job_id, event);
     let decision = coordinator::start_requirement_analysis(
         pi_client,
         &system_config,
@@ -988,6 +1188,7 @@ async fn run_initial_analysis(
         requirement,
         title,
         project_ctx.as_ref(),
+        &mut pi_event_sink,
     )
     .await?;
 
@@ -1045,6 +1246,7 @@ async fn run_followup_analysis(
     let system_config = db::get_system_config(pool).await?;
     let thinking_level = get_requirement_thinking_level(pool).await;
     let project_ctx = build_project_context(pool, project_id).await.ok();
+    let mut pi_event_sink = |event| emit_pi_job_event(event_tx, job_id, event);
     let decision = coordinator::continue_requirement_analysis(
         pi_client,
         &system_config,
@@ -1052,6 +1254,7 @@ async fn run_followup_analysis(
         session_file,
         answer_summary,
         project_ctx.as_ref(),
+        &mut pi_event_sink,
     )
     .await?;
 
@@ -1115,7 +1318,106 @@ fn emit_job_event(event_tx: &EventSender, job_id: i64, event: &str, message: &st
         job_id,
         event: event.to_string(),
         message: message.to_string(),
+        pi_type: None,
+        payload: None,
     });
+}
+
+fn emit_pi_job_event(event_tx: &EventSender, job_id: i64, payload: Value) {
+    let pi_type = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let message = summarize_pi_event(&pi_type, &payload);
+    let _ = event_tx.send(JobEvent {
+        job_id,
+        event: "pi_event".to_string(),
+        message,
+        pi_type: Some(pi_type),
+        payload: Some(payload),
+    });
+}
+
+fn summarize_pi_event(pi_type: &str, payload: &Value) -> String {
+    match pi_type {
+        "agent_start" => "Pi Agent 开始处理。".to_string(),
+        "agent_end" => "Pi Agent 处理完成。".to_string(),
+        "turn_start" => "开始新一轮推理。".to_string(),
+        "turn_end" => "本轮推理完成。".to_string(),
+        "message_start" => "开始生成消息。".to_string(),
+        "message_end" => "消息生成完成。".to_string(),
+        "message_update" => summarize_message_update(payload),
+        "tool_execution_start" => {
+            format!("开始执行工具{}。", format_tool_name(payload))
+        }
+        "tool_execution_update" => {
+            format!("工具{}正在执行。", format_tool_name(payload))
+        }
+        "tool_execution_end" => {
+            format!("工具{}执行完成。", format_tool_name(payload))
+        }
+        "queue_update" => "消息队列已更新。".to_string(),
+        "compaction_start" => "开始压缩上下文。".to_string(),
+        "compaction_end" => "上下文压缩完成。".to_string(),
+        "auto_retry_start" => "遇到临时错误，开始自动重试。".to_string(),
+        "auto_retry_end" => "自动重试结束。".to_string(),
+        "extension_error" => payload
+            .get("errorMessage")
+            .and_then(Value::as_str)
+            .map(|message| format!("扩展执行出错：{message}"))
+            .unwrap_or_else(|| "扩展执行出错。".to_string()),
+        _ => format!("Pi 事件：{pi_type}"),
+    }
+}
+
+fn summarize_message_update(payload: &Value) -> String {
+    let delta_type = payload
+        .get("assistantMessageEvent")
+        .and_then(|event| event.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match delta_type {
+        "text_delta" => "正在生成回复文本。".to_string(),
+        "thinking_delta" => "正在推理。".to_string(),
+        "tool_call_delta" => "正在生成工具调用。".to_string(),
+        _ => "消息正在更新。".to_string(),
+    }
+}
+
+fn format_tool_name(payload: &Value) -> String {
+    payload
+        .get("toolName")
+        .or_else(|| payload.get("tool_name"))
+        .or_else(|| payload.get("name"))
+        .and_then(Value::as_str)
+        .map(|name| format!(" {name}"))
+        .unwrap_or_default()
+}
+
+fn emit_project_event(
+    event_tx: &ProjectEventSender,
+    project_id: i64,
+    event: &str,
+    project: Option<db::Project>,
+) {
+    let _ = event_tx.send(ProjectEvent {
+        project_id,
+        event: event.to_string(),
+        project,
+    });
+}
+
+async fn emit_project_event_from_db(
+    pool: &Pool<Sqlite>,
+    event_tx: &ProjectEventSender,
+    project_id: i64,
+    event: &str,
+) {
+    match db::get_project(pool, project_id).await {
+        Ok(project) => emit_project_event(event_tx, project_id, event, Some(project)),
+        Err(e) => warn!("读取项目事件数据失败: {}", e),
+    }
 }
 
 // ===== Pi Config API =====
@@ -1567,5 +1869,58 @@ async fn list_thinking_policies_handler(
             warn!("获取思考策略列表失败: {}", e);
             Json(ApiResponse::err(format!("获取失败: {}", e)))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root() -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("raccoon-cleanup-test-{suffix}"))
+    }
+
+    #[test]
+    fn validates_local_cleanup_paths() {
+        let root = temp_root();
+        let session_dir = root.join("pi-sessions");
+        let workspace_dir = root.join("workspace");
+        let session_file = session_dir.join("session.jsonl");
+        let project_dir = workspace_dir.join("project-42-demo");
+        let outside_dir = root.join("outside");
+        let outside_file = outside_dir.join("session.jsonl");
+
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+        fs::write(&session_file, "{}\n").unwrap();
+        fs::write(&outside_file, "{}\n").unwrap();
+
+        assert!(validate_session_file_path(&session_dir, &session_file).is_ok());
+        assert!(validate_project_dir_path(&workspace_dir, 42, &project_dir).is_ok());
+        assert!(validate_session_file_path(&session_dir, &outside_file).is_err());
+        assert!(validate_session_file_path(&session_dir, &session_dir.join("bad.txt")).is_err());
+        assert!(validate_project_dir_path(&workspace_dir, 7, &project_dir).is_err());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn summarizes_pi_message_update_without_payload_leak() {
+        let payload = json!({
+            "type": "message_update",
+            "assistantMessageEvent": { "type": "text_delta", "delta": "{\"status\"" }
+        });
+
+        assert_eq!(
+            summarize_pi_event("message_update", &payload),
+            "正在生成回复文本。"
+        );
     }
 }

@@ -284,7 +284,20 @@ impl PiRpcClient {
     }
 
     /// 按 Pi RPC 官方客户端语义等待 `agent_end` 事件。
+    #[allow(dead_code)]
     pub async fn wait_for_agent_end(&self, timeout: tokio::time::Duration) -> Result<()> {
+        self.wait_for_agent_end_with_events(timeout, |_| {}).await
+    }
+
+    /// 等待 `agent_end`，并把期间收到的 Pi RPC 事件交给调用方处理。
+    pub async fn wait_for_agent_end_with_events<F>(
+        &self,
+        timeout: tokio::time::Duration,
+        mut on_event: F,
+    ) -> Result<()>
+    where
+        F: FnMut(Value) + Send,
+    {
         let _io_guard = self.io_lock.lock().await;
         let mut stdout = self.stdout_reader.lock().await;
         let mut buf = String::new();
@@ -304,8 +317,12 @@ impl PiRpcClient {
 
                 let val: Value = serde_json::from_str(trimmed)
                     .with_context(|| format!("Failed to parse JSON: {}", trimmed))?;
-                if val.get("type") == Some(&json!("agent_end")) {
-                    return Ok(());
+                if val.get("type") != Some(&json!("response")) {
+                    let is_agent_end = val.get("type") == Some(&json!("agent_end"));
+                    on_event(val);
+                    if is_agent_end {
+                        return Ok(());
+                    }
                 }
             }
         };

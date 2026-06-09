@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use serde_json::Value;
 use tracing::warn;
 
 use crate::db::{ClarificationOption, ClarificationSeed, SystemConfig, TaskDraftSeed};
@@ -91,6 +92,7 @@ pub async fn start_requirement_analysis(
     requirement: &str,
     title: &str,
     project_context: Option<&ProjectContext>,
+    pi_event_sink: &mut (dyn FnMut(Value) + Send),
 ) -> Result<CoordinatorDecision> {
     let _guard = pi_client.session_guard().await;
     let created = pi_client
@@ -109,6 +111,7 @@ pub async fn start_requirement_analysis(
         system_config,
         thinking_level,
         &build_initial_prompt(requirement, project_context),
+        pi_event_sink,
     )
     .await
 }
@@ -120,6 +123,7 @@ pub async fn continue_requirement_analysis(
     session_file: &str,
     answer_summary: &str,
     project_context: Option<&ProjectContext>,
+    pi_event_sink: &mut (dyn FnMut(Value) + Send),
 ) -> Result<CoordinatorDecision> {
     let _guard = pi_client.session_guard().await;
     let switched = pi_client
@@ -134,6 +138,7 @@ pub async fn continue_requirement_analysis(
         system_config,
         thinking_level,
         &build_followup_prompt(answer_summary, project_context),
+        pi_event_sink,
     )
     .await
 }
@@ -143,6 +148,7 @@ async fn run_prompt(
     system_config: &SystemConfig,
     thinking_level: &str,
     prompt: &str,
+    pi_event_sink: &mut (dyn FnMut(Value) + Send),
 ) -> Result<CoordinatorDecision> {
     pi_client
         .set_model(
@@ -161,11 +167,11 @@ async fn run_prompt(
         .await
         .context("发送 Coordinator prompt 失败")?;
     pi_client
-        .wait_for_agent_end(GENERATION_TIMEOUT)
+        .wait_for_agent_end_with_events(GENERATION_TIMEOUT, &mut *pi_event_sink)
         .await
         .context("等待 Coordinator 输出失败")?;
 
-    let mut decision = try_parse_with_retry(pi_client, prompt).await?;
+    let mut decision = try_parse_with_retry(pi_client, prompt, pi_event_sink).await?;
     let session = pi_client
         .get_state()
         .await
@@ -183,6 +189,7 @@ async fn run_prompt(
 async fn try_parse_with_retry(
     pi_client: &PiRpcClient,
     _original_prompt: &str,
+    pi_event_sink: &mut (dyn FnMut(Value) + Send),
 ) -> Result<CoordinatorDecision> {
     // 第 0 次：初始尝试
     if let Some(decision) = try_parse_from_tool_result(pi_client).await? {
@@ -211,7 +218,7 @@ async fn try_parse_with_retry(
                 .context("发送第 1 次 steer 自纠指令失败")?;
 
             pi_client
-                .wait_for_agent_end(GENERATION_TIMEOUT)
+                .wait_for_agent_end_with_events(GENERATION_TIMEOUT, &mut *pi_event_sink)
                 .await
                 .context("等待 Coordinator 第 1 次自纠输出失败")?;
 
@@ -241,7 +248,7 @@ async fn try_parse_with_retry(
                         .context("发送第 2 次 steer 自纠指令失败")?;
 
                     pi_client
-                        .wait_for_agent_end(GENERATION_TIMEOUT)
+                        .wait_for_agent_end_with_events(GENERATION_TIMEOUT, &mut *pi_event_sink)
                         .await
                         .context("等待 Coordinator 第 2 次自纠输出失败")?;
 

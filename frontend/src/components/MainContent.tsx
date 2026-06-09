@@ -21,7 +21,7 @@ export function MainContent() {
 
   if (!currentProject) {
     return (
-      <main className="flex-1 h-full bg-white">
+      <main className="min-w-0 flex-1 h-full bg-white">
         <EmptyState
           icon={<MousePointerClick className="w-8 h-8 text-slate-300" />}
           title={projects.length === 0 ? "还没有项目" : "选择一个项目"}
@@ -41,7 +41,7 @@ export function MainContent() {
   }
 
   return (
-    <main className="flex-1 h-full bg-white overflow-auto">
+    <main className="min-w-0 flex-1 h-full bg-white overflow-auto">
       <ProjectDetail project={currentProject} onDelete={handleDelete} />
     </main>
   );

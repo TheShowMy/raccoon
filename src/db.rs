@@ -38,7 +38,7 @@ pub struct TaskThinkingPolicy {
 
 // ===== Project =====
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: i64,
@@ -53,7 +53,7 @@ pub struct Project {
 
 // ===== Job / Clarification / Task Draft =====
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Job {
     pub id: i64,
@@ -228,6 +228,14 @@ pub async fn init_db() -> Result<Pool<Sqlite>> {
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                sqlx::query("PRAGMA foreign_keys = ON")
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect(&db_url)
         .await?;
 
@@ -1012,7 +1020,7 @@ pub async fn set_job_failed(pool: &Pool<Sqlite>, job_id: i64, reason: &str) -> R
     Ok(())
 }
 
-async fn get_job(pool: &Pool<Sqlite>, job_id: i64) -> Result<Job> {
+pub async fn get_job(pool: &Pool<Sqlite>, job_id: i64) -> Result<Job> {
     let job = sqlx::query_as::<_, Job>(
         "SELECT id, project_id, title, original_requirement, status, current_stage,
                 coordinator_session_id, coordinator_session_file, clarification_round, archived_at,
@@ -1496,5 +1504,33 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("项目不存在"));
+    }
+
+    #[tokio::test]
+    async fn delete_project_cascades_to_jobs_and_messages() {
+        let pool = memory_pool().await;
+        let project = create_project(&pool, "待删除项目", "https://example.com/repo.git")
+            .await
+            .unwrap();
+        let detail = create_analyzing_job(&pool, project.id, "验证级联删除")
+            .await
+            .unwrap();
+
+        assert!(delete_project(&pool, project.id).await.unwrap());
+
+        let job_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE project_id = $1")
+            .bind(project.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let message_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM job_messages WHERE job_id = $1")
+                .bind(detail.job.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        assert_eq!(job_count, 0);
+        assert_eq!(message_count, 0);
     }
 }

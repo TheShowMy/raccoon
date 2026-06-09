@@ -155,13 +155,16 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
       const parsed = JSON.parse(event.data) as StreamEvent;
       setStreamMessages((current) => [...current, parsed]);
       // progress 事件只作为临时提示，不触发 loadDetail（避免闪烁和滚动丢失）
-      if (
-        parsed.event !== "coordinator_started" &&
-        parsed.event !== "coordinator_progress"
-      ) {
+      const isTransientEvent =
+        parsed.event === "coordinator_started" ||
+        parsed.event === "coordinator_progress" ||
+        parsed.event === "pi_event";
+      if (!isTransientEvent) {
         void loadDetail(selectedJobId, false);
       }
-      void loadJobs();
+      if (parsed.event !== "pi_event") {
+        void loadJobs();
+      }
     };
     source.onmessage = handleStreamEvent;
     source.addEventListener("coordinator_started", handleStreamEvent);
@@ -169,6 +172,7 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
     source.addEventListener("clarifications_ready", handleStreamEvent);
     source.addEventListener("task_draft_ready", handleStreamEvent);
     source.addEventListener("archived", handleStreamEvent);
+    source.addEventListener("pi_event", handleStreamEvent);
     source.addEventListener("error", (event) => {
       const maybeMessage = event as MessageEvent;
       if (typeof maybeMessage.data === "string" && maybeMessage.data) {

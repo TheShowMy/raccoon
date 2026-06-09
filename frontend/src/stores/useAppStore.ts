@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 const STORAGE_KEY = "raccoon:currentProjectId";
 const SEND_WITH_ENTER_KEY = "raccoon:sendWithEnter";
+const SIDEBAR_COLLAPSED_KEY = "raccoon:sidebarCollapsed";
 
 function loadStoredProjectId(): number | null {
   try {
@@ -43,6 +44,22 @@ function saveSendWithEnter(value: boolean) {
   }
 }
 
+function loadSidebarCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function saveSidebarCollapsed(value: boolean) {
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(value));
+  } catch {
+    // ignore localStorage errors
+  }
+}
+
 function resolveCurrentProjectId(
   projects: Project[],
   preferredId: number | null,
@@ -76,10 +93,12 @@ interface AppState {
   showAddModal: boolean;
   showSettings: boolean;
   sendWithEnter: boolean;
+  sidebarCollapsed: boolean;
 
   setPiInstalled: (v: boolean) => void;
   setProjects: (p: Project[]) => void;
   addProject: (p: Project) => void;
+  updateProject: (p: Project) => void;
   removeProject: (id: number) => void;
   setCurrentProject: (id: number | null) => void;
   openAddModal: () => void;
@@ -87,6 +106,8 @@ interface AppState {
   openSettings: () => void;
   closeSettings: () => void;
   setSendWithEnter: (v: boolean) => void;
+  toggleSidebar: () => void;
+  setSidebarCollapsed: (v: boolean) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -96,6 +117,7 @@ export const useAppStore = create<AppState>((set) => ({
   showAddModal: false,
   showSettings: false,
   sendWithEnter: loadSendWithEnter(),
+  sidebarCollapsed: loadSidebarCollapsed(),
 
   setPiInstalled: (v) => set({ piInstalled: v }),
 
@@ -115,6 +137,20 @@ export const useAppStore = create<AppState>((set) => ({
       const currentProjectId =
         state.currentProjectId === null ? p.id : state.currentProjectId;
       if (currentProjectId !== null) {
+        saveStoredProjectId(currentProjectId);
+      }
+      return { projects, currentProjectId };
+    }),
+
+  updateProject: (p) =>
+    set((state) => {
+      const exists = state.projects.some((project) => project.id === p.id);
+      const projects = exists
+        ? state.projects.map((project) => (project.id === p.id ? p : project))
+        : [p, ...state.projects];
+      const currentProjectId =
+        state.currentProjectId === null ? p.id : state.currentProjectId;
+      if (state.currentProjectId === null) {
         saveStoredProjectId(currentProjectId);
       }
       return { projects, currentProjectId };
@@ -146,5 +182,15 @@ export const useAppStore = create<AppState>((set) => ({
   setSendWithEnter: (v) => {
     saveSendWithEnter(v);
     set({ sendWithEnter: v });
+  },
+  toggleSidebar: () =>
+    set((state) => {
+      const sidebarCollapsed = !state.sidebarCollapsed;
+      saveSidebarCollapsed(sidebarCollapsed);
+      return { sidebarCollapsed };
+    }),
+  setSidebarCollapsed: (v) => {
+    saveSidebarCollapsed(v);
+    set({ sidebarCollapsed: v });
   },
 }));

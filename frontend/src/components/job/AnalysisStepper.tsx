@@ -91,10 +91,26 @@ function StepItem({ step, isLast }: { step: Step; isLast: boolean }) {
 }
 
 function buildSteps(events: StreamEvent[], isActive: boolean): Step[] {
-  const progressEvents = events.filter(
-    (e) =>
-      e.event === "coordinator_progress" || e.event === "coordinator_started",
-  );
+  const progressEvents: StreamEvent[] = [];
+  let hasMessageUpdate = false;
+
+  for (const event of events) {
+    if (
+      event.event === "coordinator_progress" ||
+      event.event === "coordinator_started"
+    ) {
+      progressEvents.push(event);
+      continue;
+    }
+
+    if (event.event !== "pi_event") continue;
+    if (!shouldShowPiEvent(event)) continue;
+    if (event.piType === "message_update") {
+      if (hasMessageUpdate) continue;
+      hasMessageUpdate = true;
+    }
+    progressEvents.push(event);
+  }
 
   if (progressEvents.length === 0) {
     return isActive
@@ -106,7 +122,7 @@ function buildSteps(events: StreamEvent[], isActive: boolean): Step[] {
     const isLast = index === progressEvents.length - 1;
     return {
       id: String(index + 1),
-      label: e.message,
+      label: getEventLabel(e),
       status: isLast && isActive ? "active" : "done",
     };
   });
@@ -121,4 +137,39 @@ function buildSteps(events: StreamEvent[], isActive: boolean): Step[] {
   }
 
   return steps;
+}
+
+function shouldShowPiEvent(event: StreamEvent): boolean {
+  return (
+    event.piType === "agent_start" ||
+    event.piType === "turn_start" ||
+    event.piType === "turn_end" ||
+    event.piType === "message_update" ||
+    event.piType === "tool_execution_start" ||
+    event.piType === "tool_execution_end" ||
+    event.piType === "auto_retry_start" ||
+    event.piType === "auto_retry_end" ||
+    event.piType === "extension_error" ||
+    event.piType === "agent_end"
+  );
+}
+
+function getEventLabel(event: StreamEvent): string {
+  if (event.event !== "pi_event") return event.message;
+  if (event.piType === "message_update") {
+    return getMessageUpdateLabel(event.payload) ?? event.message;
+  }
+  return event.message;
+}
+
+function getMessageUpdateLabel(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const root = payload as Record<string, unknown>;
+  const assistantEvent = root.assistantMessageEvent;
+  if (!assistantEvent || typeof assistantEvent !== "object") return null;
+  const deltaType = (assistantEvent as Record<string, unknown>).type;
+  if (deltaType === "text_delta") return "正在生成回复文本。";
+  if (deltaType === "thinking_delta") return "正在推理。";
+  if (deltaType === "tool_call_delta") return "正在生成工具调用。";
+  return null;
 }
