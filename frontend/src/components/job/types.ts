@@ -47,6 +47,15 @@ export interface TraceData {
   live: boolean;
 }
 
+export interface LiveBubble {
+  id: string;
+  type: "thinking" | "tool" | "output" | "status";
+  label: string;
+  content: string;
+  toolName?: string;
+  status: "running" | "done" | "error";
+}
+
 export const OTHER_VALUE = "__other__";
 
 export interface StatusConfig {

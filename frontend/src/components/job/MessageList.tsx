@@ -1,6 +1,11 @@
+import { useMemo } from "react";
 import type { JobMessage, StreamEvent } from "./types";
 import { TraceBubble } from "./TraceBubble";
-import { buildRuntimeTrace, traceFromMessage } from "./traceRuntime";
+import {
+  traceFromMessage,
+  buildBubbleStreamFromEvents,
+  buildBubbleStreamFromTrace,
+} from "./traceRuntime";
 
 interface MessageListProps {
   messages: JobMessage[];
@@ -13,19 +18,22 @@ export function MessageList({
   streamMessages,
   analyzing,
 }: MessageListProps) {
-  const runtimeTrace = buildRuntimeTrace(streamMessages, analyzing);
-  const displayEvents = streamMessages.filter(
-    (e) =>
-      e.event !== "coordinator_started" &&
-      e.event !== "coordinator_progress" &&
-      e.event !== "pi_event",
+  const liveBubbles = useMemo(
+    () =>
+      analyzing && streamMessages.length > 0
+        ? buildBubbleStreamFromEvents(streamMessages)
+        : null,
+    [analyzing, streamMessages],
   );
 
-  // 如果没有历史消息和流消息，不渲染
+  const displayEvents = streamMessages.filter((e) => e.event !== "pi_event");
+
+  const hasLiveBubbles = liveBubbles && liveBubbles.length > 0;
+
   if (
     messages.length === 0 &&
     displayEvents.length === 0 &&
-    !runtimeTrace &&
+    !hasLiveBubbles &&
     !analyzing
   ) {
     return null;
@@ -37,12 +45,17 @@ export function MessageList({
       {messages.map((message) => {
         const trace = traceFromMessage(message);
         if (trace) {
-          return <TraceBubble key={message.id} trace={trace} />;
+          const bubbles = buildBubbleStreamFromTrace(trace);
+          if (bubbles.length > 0) {
+            return (
+              <TraceBubble key={message.id} bubbles={bubbles} isLive={false} />
+            );
+          }
         }
         return <ChatBubble key={message.id} message={message} />;
       })}
 
-      {/* 实时流事件（非 progress 类型） */}
+      {/* 实时流事件（非 pi_event） */}
       {displayEvents.map((message, index) => (
         <SystemBubble
           key={`${message.event}-${index}`}
@@ -50,7 +63,8 @@ export function MessageList({
         />
       ))}
 
-      {runtimeTrace && <TraceBubble trace={runtimeTrace} />}
+      {/* 实时气泡流 */}
+      {hasLiveBubbles && <TraceBubble bubbles={liveBubbles} isLive={true} />}
     </div>
   );
 }

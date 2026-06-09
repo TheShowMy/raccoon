@@ -1,4 +1,4 @@
-import type { JobMessage, StreamEvent, TraceData } from "./types";
+import type { JobMessage, StreamEvent, TraceData, LiveBubble } from "./types";
 
 export function buildRuntimeTrace(
   events: StreamEvent[],
@@ -154,4 +154,167 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object"
     ? (value as Record<string, unknown>)
     : null;
+}
+
+export function buildBubbleStreamFromEvents(
+  events: StreamEvent[],
+): LiveBubble[] {
+  const bubbles: LiveBubble[] = [];
+  let seq = 0;
+
+  for (const event of events) {
+    if (event.event !== "pi_event") continue;
+
+    switch (event.piType) {
+      case "message_update": {
+        const payload = asRecord(event.payload);
+        const assistantEvent = asRecord(payload?.assistantMessageEvent);
+        const deltaType = String(assistantEvent?.type ?? "");
+        const delta = String(
+          assistantEvent?.delta ?? assistantEvent?.text ?? "",
+        );
+        if (deltaType === "thinking_delta") {
+          const last = bubbles.at(-1);
+          if (last?.type === "thinking") {
+            last.content += delta;
+          } else {
+            bubbles.push({
+              id: `thinking-${seq++}`,
+              type: "thinking",
+              label: "思考中...",
+              content: delta,
+              status: "running",
+            });
+          }
+        } else if (deltaType === "text_delta") {
+          const last = bubbles.at(-1);
+          if (last?.type === "output") {
+            last.content += delta;
+          } else {
+            bubbles.push({
+              id: `output-${seq++}`,
+              type: "output",
+              label: "输出",
+              content: delta,
+              status: "running",
+            });
+          }
+        }
+        break;
+      }
+
+      case "tool_execution_start": {
+        const payload = asRecord(event.payload);
+        const toolCallId = String(
+          payload?.toolCallId ?? payload?.tool_call_id ?? "unknown",
+        );
+        const toolName = String(
+          payload?.toolName ?? payload?.tool_name ?? "tool",
+        );
+        bubbles.push({
+          id: toolCallId,
+          type: "tool",
+          label: toolName,
+          content: "",
+          toolName,
+          status: "running",
+        });
+        break;
+      }
+
+      case "tool_execution_update": {
+        const payload = asRecord(event.payload);
+        if (!payload) break;
+        const toolCallId = String(payload.toolCallId ?? payload.tool_call_id);
+        const output = extractToolOutput(payload);
+        const bubble = bubbles.find(
+          (b) => b.id === toolCallId && b.type === "tool",
+        );
+        if (bubble && output) {
+          bubble.content = output;
+        }
+        break;
+      }
+
+      case "tool_execution_end": {
+        const payload = asRecord(event.payload);
+        if (!payload) break;
+        const toolCallId = String(payload.toolCallId ?? payload.tool_call_id);
+        const output = extractToolOutput(payload);
+        const bubble = bubbles.find(
+          (b) => b.id === toolCallId && b.type === "tool",
+        );
+        if (bubble) {
+          bubble.status =
+            (payload.isError ?? payload.is_error) ? "error" : "done";
+          if (output) bubble.content = output;
+        }
+        break;
+      }
+
+      case "agent_end": {
+        for (const b of bubbles) {
+          if (b.status === "running") b.status = "done";
+        }
+        bubbles.push({
+          id: `end-${seq}`,
+          type: "status",
+          label: "执行完成",
+          content: "",
+          status: "done",
+        });
+        break;
+      }
+    }
+  }
+
+  return bubbles;
+}
+
+export function buildBubbleStreamFromTrace(trace: TraceData): LiveBubble[] {
+  const bubbles: LiveBubble[] = [];
+  let seq = 0;
+
+  if (trace.thinking.trim()) {
+    bubbles.push({
+      id: `thinking-${seq++}`,
+      type: "thinking",
+      label: "思考过程",
+      content: trace.thinking,
+      status: "done",
+    });
+  }
+
+  for (const tool of trace.tools) {
+    bubbles.push({
+      id: tool.toolCallId,
+      type: "tool",
+      label: tool.toolName,
+      content: tool.output,
+      toolName: tool.toolName,
+      status: tool.isError ? "error" : "done",
+    });
+  }
+
+  if (trace.output.trim()) {
+    bubbles.push({
+      id: `output-${seq++}`,
+      type: "output",
+      label: "输出",
+      content: trace.output,
+      status: "done",
+    });
+  }
+
+  if (trace.completed) {
+    bubbles.push({
+      id: `end-${seq}`,
+      type: "status",
+      label: "执行完成",
+      content: "",
+      status: "done",
+    });
+  }
+
+  return bubbles;
 }
