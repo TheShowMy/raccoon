@@ -375,8 +375,15 @@ fn build_worker_prompt(node: &DagNode) -> String {
 }
 
 async fn create_worktree(project_path: &Path, worktree_path: &Path) -> Result<()> {
+    // 如果 worktree 已存在，先移除旧的（避免残留文件导致 diff 冲突）
     if worktree_path.exists() {
-        return Ok(());
+        let _ = tokio::fs::remove_dir_all(worktree_path).await;
+        // 清理 git 的 worktree 记录
+        let _ = Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(project_path)
+            .output()
+            .await;
     }
     if let Some(parent) = worktree_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
