@@ -207,6 +207,11 @@ export interface Job {
   coordinatorSessionFile?: string | null;
   clarificationRound: number;
   archivedAt?: string | null;
+  prBranch?: string | null;
+  prUrl?: string | null;
+  prStatus?: string | null;
+  prMergedAt?: string | null;
+  prMergeCommit?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -393,4 +398,47 @@ export async function appendJobMessage(
     body: JSON.stringify({ content }),
   });
   return handleResponse<JobDetail>(res);
+}
+
+// ===== PR API =====
+
+export interface PrConfig {
+  prEnabled: boolean;
+  prAutoMerge: boolean;
+  prTargetBranch: string;
+  prMergeStrategy: string;
+  githubToken?: string;
+}
+
+export interface PrOperation {
+  id: number;
+  jobId: number;
+  operation: string;
+  status: string;
+  detail?: string;
+  createdAt: string;
+}
+
+export async function updateProjectPrConfig(
+  projectId: number,
+  config: PrConfig,
+): Promise<boolean> {
+  const res = await fetch(`/api/projects/${projectId}/pr-config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  return handleResponse<boolean>(res);
+}
+
+export async function getJobPrStatus(jobId: number): Promise<Job> {
+  const res = await fetch(`/api/jobs/${jobId}/pr`);
+  return handleResponse<Job>(res);
+}
+
+export async function getJobPrOperations(
+  jobId: number,
+): Promise<PrOperation[]> {
+  const res = await fetch(`/api/jobs/${jobId}/pr-operations`);
+  return handleResponse<PrOperation[]>(res);
 }

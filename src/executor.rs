@@ -5,8 +5,11 @@ use std::path::Path;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::db::{self, DagEdge, DagNode, TaskArtifactSeed};
+use crate::db::{self, DagEdge, DagNode, Project, TaskArtifactSeed};
+use crate::git_pr;
 use crate::pi_rpc::PiRpcClient;
+use crate::workspace_cleanup;
+use tracing::warn;
 
 const WORKER_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(600);
 
@@ -17,10 +20,12 @@ pub struct NodeExecutionUpdate {
     pub message: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_dag<F>(
     pool: &Pool<Sqlite>,
     job_id: i64,
     project_path: &Path,
+    project: &Project,
     workspace_dir: &Path,
     pi_session_dir: &Path,
     extension_path: Option<&Path>,
@@ -29,6 +34,44 @@ pub async fn execute_dag<F>(
 where
     F: FnMut(NodeExecutionUpdate) + Send,
 {
+    let pr_enabled = project.pr_enabled;
+    let base_branch = &project.pr_target_branch;
+    let feature_branch = format!("raccoon/job-{}", job_id);
+
+    // ── 前置准备 ─────────────────────────────
+    if pr_enabled {
+        match git_pr::create_feature_branch(project_path, job_id, base_branch).await {
+            Ok(branch) => {
+                db::create_pr_operation(pool, job_id, "create_branch", "success", Some(&branch))
+                    .await?;
+                db::update_job_pr_status(pool, job_id, Some(&branch), None, Some("pending"))
+                    .await?;
+                on_update(NodeExecutionUpdate {
+                    node_id: 0,
+                    status: "pr_branch_created".to_string(),
+                    message: format!("创建 PR 分支: {}", branch),
+                });
+            }
+            Err(e) => {
+                db::create_pr_operation(
+                    pool,
+                    job_id,
+                    "create_branch",
+                    "failed",
+                    Some(&e.to_string()),
+                )
+                .await?;
+                db::mark_job_blocked(pool, job_id, &format!("创建 PR 分支失败: {}", e)).await?;
+                on_update(NodeExecutionUpdate {
+                    node_id: 0,
+                    status: "pr_branch_failed".to_string(),
+                    message: format!("创建 PR 分支失败: {}", e),
+                });
+                return Ok(());
+            }
+        }
+    }
+
     db::mark_job_executing(pool, job_id).await?;
     let mut nodes = db::get_dag_nodes(pool, job_id).await?;
     let edges = db::get_dag_edges(pool, job_id).await?;
@@ -66,6 +109,7 @@ where
             pi_session_dir,
             extension_path,
             &node,
+            pr_enabled,
         )
         .await
         {
@@ -87,6 +131,14 @@ where
                     &format!("DAG 节点执行失败：{}。原因：{}", node.title, message),
                 )
                 .await?;
+
+                // PR 模式失败时清理分支
+                if pr_enabled {
+                    let _ = git_pr::cleanup_branch(project_path, &feature_branch).await;
+                    db::create_pr_operation(pool, job_id, "cleanup", "success", Some("失败回滚"))
+                        .await?;
+                }
+
                 on_update(NodeExecutionUpdate {
                     node_id: node.id,
                     status: "failed".to_string(),
@@ -99,10 +151,40 @@ where
         nodes = db::get_dag_nodes(pool, job_id).await?;
     }
 
-    db::mark_job_completed(pool, job_id).await?;
+    // ── 后置 PR 流程 ─────────────────────────
+    if pr_enabled {
+        match execute_pr_flow(
+            pool,
+            job_id,
+            project_path,
+            project,
+            workspace_dir,
+            pi_session_dir,
+            &feature_branch,
+            &mut on_update,
+        )
+        .await
+        {
+            Ok(()) => {
+                db::mark_job_completed(pool, job_id).await?;
+            }
+            Err(e) => {
+                warn!("PR 流程失败: {}", e);
+                db::update_job_pr_status(pool, job_id, None, None, Some("failed")).await?;
+                db::create_pr_operation(pool, job_id, "pr_flow", "failed", Some(&e.to_string()))
+                    .await?;
+                // PR 流程失败不阻塞 Job 完成状态
+                db::mark_job_completed(pool, job_id).await?;
+            }
+        }
+    } else {
+        db::mark_job_completed(pool, job_id).await?;
+    }
+
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_node(
     pool: &Pool<Sqlite>,
     job_id: i64,
@@ -111,6 +193,7 @@ async fn execute_node(
     pi_session_dir: &Path,
     extension_path: Option<&Path>,
     node: &DagNode,
+    pr_enabled: bool,
 ) -> Result<String> {
     let worktree_path = workspace_dir
         .join("worktrees")
@@ -183,7 +266,12 @@ async fn execute_node(
         },
     )
     .await?;
-    apply_diff(project_path, &diff).await?;
+    if pr_enabled {
+        // PR 模式：将 diff apply 到当前 feature 分支
+        git_pr::apply_diff_to_branch(project_path, "", &diff).await?;
+    } else {
+        apply_diff(project_path, &diff).await?;
+    }
 
     Ok(format!("节点执行完成并已合入 diff：{}", node.title))
 }
@@ -419,6 +507,151 @@ fn topo_order(nodes: &[DagNode], edges: &[DagEdge]) -> Result<Vec<i64>> {
     }
 
     Ok(order)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_pr_flow<F>(
+    pool: &Pool<Sqlite>,
+    job_id: i64,
+    project_path: &Path,
+    project: &Project,
+    workspace_dir: &Path,
+    pi_session_dir: &Path,
+    feature_branch: &str,
+    on_update: &mut F,
+) -> Result<()>
+where
+    F: FnMut(NodeExecutionUpdate) + Send,
+{
+    let job = db::get_job(pool, job_id).await?;
+
+    // 1. 提交变更
+    let commit_msg = format!(
+        "feat: raccoon 自动执行结果 (job-{})\n\n任务: {}\n由 raccoon DAG 编排器自动执行",
+        job_id, job.title
+    );
+    git_pr::commit_changes(project_path, feature_branch, &commit_msg).await?;
+    db::create_pr_operation(pool, job_id, "commit", "success", None).await?;
+
+    on_update(NodeExecutionUpdate {
+        node_id: 0,
+        status: "pr_committed".to_string(),
+        message: "变更已提交到 feature 分支".to_string(),
+    });
+
+    // 2. 推送分支
+    git_pr::push_branch(project_path, feature_branch).await?;
+    db::create_pr_operation(pool, job_id, "push", "success", Some(feature_branch)).await?;
+
+    on_update(NodeExecutionUpdate {
+        node_id: 0,
+        status: "pr_pushed".to_string(),
+        message: format!("分支已推送: {}", feature_branch),
+    });
+
+    // 3. 创建 PR
+    let pr_body = build_pr_body(pool, job_id, &job).await?;
+    let pr = git_pr::create_pull_request(
+        project_path,
+        feature_branch,
+        &project.pr_target_branch,
+        &format!("[raccoon] {}", job.title),
+        &pr_body,
+        project.github_token.as_deref(),
+    )
+    .await?;
+
+    db::update_job_pr_status(
+        pool,
+        job_id,
+        Some(feature_branch),
+        Some(&pr.pr_url),
+        Some("created"),
+    )
+    .await?;
+    db::create_pr_operation(pool, job_id, "create_pr", "success", Some(&pr.pr_url)).await?;
+
+    on_update(NodeExecutionUpdate {
+        node_id: 0,
+        status: "pr_created".to_string(),
+        message: format!("PR 已创建: {}", pr.pr_url),
+    });
+
+    // 4. 自动合并（无人工确认）
+    let merge_commit = git_pr::merge_pull_request(
+        project_path,
+        pr.pr_number,
+        &project.pr_merge_strategy,
+        project.github_token.as_deref(),
+    )
+    .await?;
+
+    db::update_job_pr_status(pool, job_id, None, Some(&pr.pr_url), Some("merged")).await?;
+    db::update_job_pr_merge_info(pool, job_id, &merge_commit).await?;
+    db::create_pr_operation(pool, job_id, "merge_pr", "success", Some(&merge_commit)).await?;
+
+    on_update(NodeExecutionUpdate {
+        node_id: 0,
+        status: "pr_merged".to_string(),
+        message: format!("PR 已合并: {}", pr.pr_url),
+    });
+
+    // 5. 清理工作区（合并完成后）
+    let cleanup = workspace_cleanup::cleanup_job_workspace(
+        job_id,
+        workspace_dir,
+        pi_session_dir,
+        project_path,
+        Some(feature_branch),
+    )
+    .await?;
+
+    db::create_pr_operation(
+        pool,
+        job_id,
+        "cleanup",
+        "success",
+        Some(&format!(
+            "删除 {} 个 worktree, {} 个 session, 分支清理: {}",
+            cleanup.worktrees_deleted, cleanup.sessions_deleted, cleanup.branch_deleted
+        )),
+    )
+    .await?;
+
+    on_update(NodeExecutionUpdate {
+        node_id: 0,
+        status: "workspace_cleaned".to_string(),
+        message: "工作区已清理".to_string(),
+    });
+
+    Ok(())
+}
+
+async fn build_pr_body(pool: &Pool<Sqlite>, job_id: i64, job: &db::Job) -> Result<String> {
+    let detail = db::get_job_detail(pool, job_id).await?;
+
+    let mut body = format!(
+        "## 任务概述\n\n{}\n\n## 原始需求\n\n{}\n\n",
+        job.title, job.original_requirement
+    );
+
+    // 添加 DAG 节点执行摘要
+    body.push_str("## 执行节点\n\n");
+    for node in &detail.dag_nodes {
+        let status_emoji = match node.status.as_str() {
+            "succeeded" => "✅",
+            "failed" => "❌",
+            _ => "⏳",
+        };
+        body.push_str(&format!(
+            "{} **{}** ({})\n\n",
+            status_emoji, node.title, node.kind
+        ));
+    }
+
+    body.push_str("\n---\n\n*由 [raccoon](https://github.com/TheShowMy/raccoon) 自动创建*");
+
+    Ok(body)
 }
 
 #[cfg(test)]

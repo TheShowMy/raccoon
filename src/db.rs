@@ -48,6 +48,24 @@ pub struct Project {
     pub clone_status: Option<String>,
     pub clone_error: Option<String>,
     pub last_synced_at: Option<String>,
+    pub pr_enabled: bool,
+    pub pr_auto_merge: bool,
+    pub pr_target_branch: String,
+    pub pr_merge_strategy: String,
+    pub github_token: Option<String>,
+    pub created_at: String,
+}
+
+// ===== PR Operation Audit Log =====
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct PrOperation {
+    pub id: i64,
+    pub job_id: i64,
+    pub operation: String,
+    pub status: String,
+    pub detail: Option<String>,
     pub created_at: String,
 }
 
@@ -66,6 +84,11 @@ pub struct Job {
     pub coordinator_session_file: Option<String>,
     pub clarification_round: i64,
     pub archived_at: Option<String>,
+    pub pr_branch: Option<String>,
+    pub pr_url: Option<String>,
+    pub pr_status: Option<String>,
+    pub pr_merged_at: Option<String>,
+    pub pr_merge_commit: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -391,6 +414,11 @@ pub async fn init_db() -> Result<Pool<Sqlite>> {
             clone_status TEXT DEFAULT 'pending',
             clone_error TEXT,
             last_synced_at DATETIME,
+            pr_enabled INTEGER NOT NULL DEFAULT 0,
+            pr_auto_merge INTEGER NOT NULL DEFAULT 1,
+            pr_target_branch TEXT NOT NULL DEFAULT 'main',
+            pr_merge_strategy TEXT NOT NULL DEFAULT 'squash',
+            github_token TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
     )
@@ -402,6 +430,35 @@ pub async fn init_db() -> Result<Pool<Sqlite>> {
     add_column_if_missing(&pool, "projects", "clone_status", "TEXT DEFAULT 'pending'").await?;
     add_column_if_missing(&pool, "projects", "clone_error", "TEXT").await?;
     add_column_if_missing(&pool, "projects", "last_synced_at", "DATETIME").await?;
+    add_column_if_missing(
+        &pool,
+        "projects",
+        "pr_enabled",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    add_column_if_missing(
+        &pool,
+        "projects",
+        "pr_auto_merge",
+        "INTEGER NOT NULL DEFAULT 1",
+    )
+    .await?;
+    add_column_if_missing(
+        &pool,
+        "projects",
+        "pr_target_branch",
+        "TEXT NOT NULL DEFAULT 'main'",
+    )
+    .await?;
+    add_column_if_missing(
+        &pool,
+        "projects",
+        "pr_merge_strategy",
+        "TEXT NOT NULL DEFAULT 'squash'",
+    )
+    .await?;
+    add_column_if_missing(&pool, "projects", "github_token", "TEXT").await?;
 
     // Create jobs table
     sqlx::query(
@@ -416,6 +473,11 @@ pub async fn init_db() -> Result<Pool<Sqlite>> {
             coordinator_session_file TEXT,
             clarification_round INTEGER NOT NULL DEFAULT 0,
             archived_at DATETIME,
+            pr_branch TEXT,
+            pr_url TEXT,
+            pr_status TEXT,
+            pr_merged_at DATETIME,
+            pr_merge_commit TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -440,6 +502,21 @@ pub async fn init_db() -> Result<Pool<Sqlite>> {
     .await?;
 
     migrate_job_tables(&pool).await?;
+
+    // Create PR operations audit log table
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS pr_operations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            operation TEXT NOT NULL,
+            status TEXT NOT NULL,
+            detail TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+        )",
+    )
+    .execute(&pool)
+    .await?;
 
     // Create clarification items table
     sqlx::query(
@@ -619,6 +696,11 @@ async fn migrate_job_tables(pool: &Pool<Sqlite>) -> Result<()> {
     .await?;
     add_column_if_missing(pool, "jobs", "archived_at", "DATETIME").await?;
     add_column_if_missing(pool, "job_messages", "metadata_json", "TEXT").await?;
+    add_column_if_missing(pool, "jobs", "pr_branch", "TEXT").await?;
+    add_column_if_missing(pool, "jobs", "pr_url", "TEXT").await?;
+    add_column_if_missing(pool, "jobs", "pr_status", "TEXT").await?;
+    add_column_if_missing(pool, "jobs", "pr_merged_at", "DATETIME").await?;
+    add_column_if_missing(pool, "jobs", "pr_merge_commit", "TEXT").await?;
     sqlx::query(
         "UPDATE jobs
          SET status = 'archived',
@@ -816,7 +898,8 @@ pub async fn get_task_thinking_level(pool: &Pool<Sqlite>, task_type: &str) -> Re
 
 pub async fn get_projects(pool: &Pool<Sqlite>) -> Result<Vec<Project>> {
     let projects = sqlx::query_as::<_, Project>(
-        "SELECT id, name, git_url, local_path, clone_status, clone_error, last_synced_at, created_at
+        "SELECT id, name, git_url, local_path, clone_status, clone_error, last_synced_at,
+                pr_enabled, pr_auto_merge, pr_target_branch, pr_merge_strategy, github_token, created_at
          FROM projects ORDER BY created_at DESC",
     )
     .fetch_all(pool)
@@ -827,7 +910,8 @@ pub async fn get_projects(pool: &Pool<Sqlite>) -> Result<Vec<Project>> {
 
 pub async fn get_project(pool: &Pool<Sqlite>, project_id: i64) -> Result<Project> {
     let project = sqlx::query_as::<_, Project>(
-        "SELECT id, name, git_url, local_path, clone_status, clone_error, last_synced_at, created_at
+        "SELECT id, name, git_url, local_path, clone_status, clone_error, last_synced_at,
+                pr_enabled, pr_auto_merge, pr_target_branch, pr_merge_strategy, github_token, created_at
          FROM projects WHERE id = $1",
     )
     .bind(project_id)
@@ -846,7 +930,8 @@ pub async fn create_project(pool: &Pool<Sqlite>, name: &str, git_url: &str) -> R
         .last_insert_rowid();
 
     let project = sqlx::query_as::<_, Project>(
-        "SELECT id, name, git_url, local_path, clone_status, clone_error, last_synced_at, created_at
+        "SELECT id, name, git_url, local_path, clone_status, clone_error, last_synced_at,
+                pr_enabled, pr_auto_merge, pr_target_branch, pr_merge_strategy, github_token, created_at
          FROM projects WHERE id = $1",
     )
     .bind(id)
@@ -854,6 +939,36 @@ pub async fn create_project(pool: &Pool<Sqlite>, name: &str, git_url: &str) -> R
     .await?;
 
     Ok(project)
+}
+
+pub async fn update_project_pr_config(
+    pool: &Pool<Sqlite>,
+    project_id: i64,
+    pr_enabled: bool,
+    pr_auto_merge: bool,
+    pr_target_branch: &str,
+    pr_merge_strategy: &str,
+    github_token: Option<&str>,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE projects
+         SET pr_enabled = $1,
+             pr_auto_merge = $2,
+             pr_target_branch = $3,
+             pr_merge_strategy = $4,
+             github_token = $5
+         WHERE id = $6",
+    )
+    .bind(pr_enabled)
+    .bind(pr_auto_merge)
+    .bind(pr_target_branch)
+    .bind(pr_merge_strategy)
+    .bind(github_token)
+    .bind(project_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn update_project_clone_status(
@@ -1068,6 +1183,7 @@ pub async fn get_project_jobs(
     let sql = format!(
         "SELECT id, project_id, title, original_requirement, status, current_stage,
                 coordinator_session_id, coordinator_session_file, clarification_round, archived_at,
+                pr_branch, pr_url, pr_status, pr_merged_at, pr_merge_commit,
                 created_at, updated_at
          FROM jobs
          WHERE project_id = $1 {archived_filter}
@@ -1587,6 +1703,7 @@ pub async fn get_job(pool: &Pool<Sqlite>, job_id: i64) -> Result<Job> {
     let job = sqlx::query_as::<_, Job>(
         "SELECT id, project_id, title, original_requirement, status, current_stage,
                 coordinator_session_id, coordinator_session_file, clarification_round, archived_at,
+                pr_branch, pr_url, pr_status, pr_merged_at, pr_merge_commit,
                 created_at, updated_at
          FROM jobs WHERE id = $1",
     )
@@ -1595,6 +1712,98 @@ pub async fn get_job(pool: &Pool<Sqlite>, job_id: i64) -> Result<Job> {
     .await?;
 
     Ok(job)
+}
+
+pub async fn update_job_pr_status(
+    pool: &Pool<Sqlite>,
+    job_id: i64,
+    pr_branch: Option<&str>,
+    pr_url: Option<&str>,
+    pr_status: Option<&str>,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE jobs
+         SET pr_branch = COALESCE($1, pr_branch),
+             pr_url = COALESCE($2, pr_url),
+             pr_status = COALESCE($3, pr_status),
+             updated_at = datetime('now')
+         WHERE id = $4",
+    )
+    .bind(pr_branch)
+    .bind(pr_url)
+    .bind(pr_status)
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn update_job_pr_merge_info(
+    pool: &Pool<Sqlite>,
+    job_id: i64,
+    merge_commit: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE jobs
+         SET pr_merge_commit = $1,
+             pr_merged_at = datetime('now'),
+             updated_at = datetime('now')
+         WHERE id = $2",
+    )
+    .bind(merge_commit)
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn create_pr_operation(
+    pool: &Pool<Sqlite>,
+    job_id: i64,
+    operation: &str,
+    status: &str,
+    detail: Option<&str>,
+) -> Result<PrOperation> {
+    let id = sqlx::query(
+        "INSERT INTO pr_operations (job_id, operation, status, detail)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(job_id)
+    .bind(operation)
+    .bind(status)
+    .bind(detail)
+    .execute(pool)
+    .await?
+    .last_insert_rowid();
+
+    let op = sqlx::query_as::<_, PrOperation>(
+        "SELECT id, job_id, operation, status, detail, created_at
+         FROM pr_operations WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(op)
+}
+
+pub async fn get_pr_operations_by_job(
+    pool: &Pool<Sqlite>,
+    job_id: i64,
+) -> Result<Vec<PrOperation>> {
+    let ops = sqlx::query_as::<_, PrOperation>(
+        "SELECT id, job_id, operation, status, detail, created_at
+         FROM pr_operations
+         WHERE job_id = $1
+         ORDER BY id ASC",
+    )
+    .bind(job_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(ops)
 }
 
 async fn get_job_messages(pool: &Pool<Sqlite>, job_id: i64) -> Result<Vec<JobMessage>> {

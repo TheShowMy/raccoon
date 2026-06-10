@@ -83,6 +83,11 @@ export interface Project {
   cloneStatus?: "pending" | "cloning" | "ready" | "failed" | string;
   cloneError?: string | null;
   lastSyncedAt?: string | null;
+  prEnabled?: boolean;
+  prAutoMerge?: boolean;
+  prTargetBranch?: string;
+  prMergeStrategy?: string;
+  githubToken?: string | null;
   createdAt: string;
 }
 

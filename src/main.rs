@@ -25,8 +25,10 @@ use tracing::{info, warn};
 mod coordinator;
 mod db;
 mod executor;
+mod git_pr;
 mod pi_rpc;
 mod planner;
+mod workspace_cleanup;
 
 const PORT: u16 = 3003;
 
@@ -352,8 +354,17 @@ fn create_router(state: Arc<AppState>) -> Router {
             get(list_thinking_policies_handler),
         )
         .route("/api/projects/:id", get(get_project_handler))
+        .route(
+            "/api/projects/:id/pr-config",
+            put(update_project_pr_config_handler),
+        )
         .route("/api/projects/:id/files", get(list_project_files_handler))
         .route("/api/projects/:id/clone", post(reclone_project_handler))
+        .route("/api/jobs/:id/pr", get(get_job_pr_handler))
+        .route(
+            "/api/jobs/:id/pr-operations",
+            get(get_job_pr_operations_handler),
+        )
         .route("/api/jobs/:id/close-agent", post(close_job_agent_handler))
         .layer(Extension(state));
 
@@ -1372,7 +1383,7 @@ fn spawn_dag_execution(
     pool: Pool<Sqlite>,
     event_tx: EventSender,
     job_id: i64,
-    _project_id: i64,
+    project_id: i64,
     local_path: String,
     state: Arc<AppState>,
 ) {
@@ -1384,10 +1395,24 @@ fn spawn_dag_execution(
             "恢复 DAG 执行。",
         );
 
+        let project_for_exec = match db::get_project(&pool, project_id).await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("获取项目信息失败: {}", e);
+                emit_job_event(
+                    &event_tx,
+                    job_id,
+                    "error",
+                    &format!("获取项目信息失败: {}", e),
+                );
+                return;
+            }
+        };
         let result = executor::execute_dag(
             &pool,
             job_id,
             FsPath::new(&local_path),
+            &project_for_exec,
             &state.workspace_dir,
             &state.pi_session_dir,
             state.worker_extension_path.as_deref(),
@@ -1513,6 +1538,7 @@ async fn run_dag_planning_and_execution(
         pool,
         job_id,
         FsPath::new(local_path),
+        &project,
         &state.workspace_dir,
         &state.pi_session_dir,
         state.worker_extension_path.as_deref(),
@@ -2449,6 +2475,67 @@ async fn list_thinking_policies_handler(
         Ok(policies) => Json(ApiResponse::ok(policies)),
         Err(e) => {
             warn!("获取思考策略列表失败: {}", e);
+            Json(ApiResponse::err(format!("获取失败: {}", e)))
+        }
+    }
+}
+
+// ===== PR Config API =====
+
+#[derive(Deserialize)]
+struct UpdatePrConfigRequest {
+    pr_enabled: bool,
+    pr_auto_merge: bool,
+    pr_target_branch: String,
+    pr_merge_strategy: String,
+    github_token: Option<String>,
+}
+
+async fn update_project_pr_config_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<UpdatePrConfigRequest>,
+) -> Json<ApiResponse<bool>> {
+    match db::update_project_pr_config(
+        &state.pool,
+        id,
+        body.pr_enabled,
+        body.pr_auto_merge,
+        &body.pr_target_branch,
+        &body.pr_merge_strategy,
+        body.github_token.as_deref(),
+    )
+    .await
+    {
+        Ok(updated) => Json(ApiResponse::ok(updated)),
+        Err(e) => {
+            warn!("更新项目 PR 配置失败: {}", e);
+            Json(ApiResponse::err(format!("更新失败: {}", e)))
+        }
+    }
+}
+
+async fn get_job_pr_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Json<ApiResponse<db::Job>> {
+    match db::get_job(&state.pool, id).await {
+        Ok(job) => Json(ApiResponse::ok(job)),
+        Err(e) => {
+            warn!("获取 Job PR 状态失败: {}", e);
+            Json(ApiResponse::err(format!("获取失败: {}", e)))
+        }
+    }
+}
+
+async fn get_job_pr_operations_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Json<ApiResponse<Vec<db::PrOperation>>> {
+    match db::get_pr_operations_by_job(&state.pool, id).await {
+        Ok(ops) => Json(ApiResponse::ok(ops)),
+        Err(e) => {
+            warn!("获取 PR 操作日志失败: {}", e);
             Json(ApiResponse::err(format!("获取失败: {}", e)))
         }
     }
