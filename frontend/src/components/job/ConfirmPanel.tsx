@@ -31,7 +31,7 @@ export function ConfirmPanel({
           ) : (
             <CheckCircle2 className="h-4 w-4" />
           )}
-          确认并归档
+          确认并生成 DAG
         </button>
       </div>
 

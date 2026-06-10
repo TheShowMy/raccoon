@@ -6,6 +6,18 @@ const STATUS_CONFIG: Record<string, { label: string; className: string }> = {
   analyzing: { label: "分析中", className: "bg-sky-100 text-sky-700" },
   clarifying: { label: "待澄清", className: "bg-amber-100 text-amber-700" },
   draft_ready: { label: "待确认", className: "bg-indigo-100 text-indigo-700" },
+  dag_planning: {
+    label: "规划 DAG",
+    className: "bg-violet-100 text-violet-700",
+  },
+  dag_planning_failed: {
+    label: "规划失败",
+    className: "bg-rose-100 text-rose-700",
+  },
+  dag_ready: { label: "待执行", className: "bg-cyan-100 text-cyan-700" },
+  executing: { label: "执行中", className: "bg-blue-100 text-blue-700" },
+  completed: { label: "已完成", className: "bg-emerald-100 text-emerald-700" },
+  blocked: { label: "阻塞", className: "bg-orange-100 text-orange-700" },
   archived: { label: "已归档", className: "bg-slate-100 text-slate-500" },
   confirmed: { label: "已确认", className: "bg-emerald-100 text-emerald-700" },
   failed: { label: "失败", className: "bg-rose-100 text-rose-700" },

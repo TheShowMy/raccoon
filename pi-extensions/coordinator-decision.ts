@@ -43,13 +43,18 @@ const submitDecisionTool = defineTool({
 	name: "submit_coordinator_decision",
 	label: "Submit Coordinator Decision",
 	description:
-		"作为 raccoon Coordinator，提交你对用户需求的最终分析决策。在分析完成后必须调用此工具一次，将结果以结构化形式输出。",
+		"作为 raccoon Requirement Analyst，提交你对用户需求的最终分析决策。本工具只用于需求澄清和确认，禁止包含任务拆分、DAG、执行计划或节点依赖。",
 	promptSnippet: "Submit the final requirement analysis decision as structured data",
 	promptGuidelines: [
 		"Use submit_coordinator_decision as your final action after analyzing the user's requirement.",
-		"Set status to 'needs_clarification' if key uncertainties remain, otherwise 'ready'.",
-		"When status is 'needs_clarification', provide 1-6 clarification questions.",
+		"All user-visible fields must be written in Simplified Chinese, including progress, clarification questions, options, draft title, summary, and acceptance criteria.",
+		"Do not output English thinking text, English progress text, or mixed-language analysis unless preserving technical names, file names, or API names.",
+		"Set status to 'needs_clarification' only when an uncertainty affects the implementation path, acceptance criteria, data compatibility, or security boundary.",
+		"Set status to 'ready' when missing details can be handled by project conventions, minimal viable scope, or safe defaults; include those assumptions in the draft.",
+		"When status is 'needs_clarification', provide 1-6 clarification questions with meaningful tradeoffs.",
+		"For single_choice and multi_choice questions, provide 2-4 mutually exclusive options and put the sole recommended option first when one exists.",
 		"When status is 'ready', provide the task draft with title, summary, and acceptance criteria.",
+		"Do not split the work into tasks, do not create a DAG, and do not include execution plans.",
 	],
 	parameters: Type.Object({
 		status: Type.String({

@@ -153,6 +153,126 @@ pub struct TaskDraftSeed {
     pub acceptance_criteria: Vec<String>,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct DagNodeRow {
+    id: i64,
+    job_id: i64,
+    node_key: String,
+    title: String,
+    kind: String,
+    worker_identity: String,
+    status: String,
+    instructions: String,
+    acceptance_criteria_json: String,
+    target_files_json: String,
+    worktree_path: Option<String>,
+    session_id: Option<String>,
+    session_file: Option<String>,
+    retry_count: i64,
+    error_message: Option<String>,
+    result_summary: Option<String>,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DagNode {
+    pub id: i64,
+    pub job_id: i64,
+    pub node_key: String,
+    pub title: String,
+    pub kind: String,
+    pub worker_identity: String,
+    pub status: String,
+    pub instructions: String,
+    pub acceptance_criteria: Vec<String>,
+    pub target_files: Vec<String>,
+    pub worktree_path: Option<String>,
+    pub session_id: Option<String>,
+    pub session_file: Option<String>,
+    pub retry_count: i64,
+    pub error_message: Option<String>,
+    pub result_summary: Option<String>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct DagEdge {
+    pub id: i64,
+    pub job_id: i64,
+    pub from_node_id: i64,
+    pub to_node_id: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[allow(dead_code)]
+#[serde(rename_all = "camelCase")]
+pub struct DagRun {
+    pub id: i64,
+    pub job_id: i64,
+    pub status: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct TaskArtifactRow {
+    id: i64,
+    job_id: i64,
+    node_id: i64,
+    artifact_type: String,
+    path: Option<String>,
+    content: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskArtifact {
+    pub id: i64,
+    pub job_id: i64,
+    pub node_id: i64,
+    pub artifact_type: String,
+    pub path: Option<String>,
+    pub content: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DagNodeSeed {
+    pub node_key: String,
+    pub title: String,
+    pub kind: String,
+    pub worker_identity: String,
+    pub instructions: String,
+    pub acceptance_criteria: Vec<String>,
+    pub target_files: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DagEdgeSeed {
+    pub from_node_key: String,
+    pub to_node_key: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskArtifactSeed {
+    pub node_id: i64,
+    pub artifact_type: String,
+    pub path: Option<String>,
+    pub content: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobDetail {
@@ -160,6 +280,9 @@ pub struct JobDetail {
     pub messages: Vec<JobMessage>,
     pub clarifications: Vec<ClarificationItem>,
     pub task_drafts: Vec<TaskDraft>,
+    pub dag_nodes: Vec<DagNode>,
+    pub dag_edges: Vec<DagEdge>,
+    pub task_artifacts: Vec<TaskArtifact>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -347,6 +470,86 @@ pub async fn init_db() -> Result<Pool<Sqlite>> {
             status TEXT NOT NULL DEFAULT 'draft',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    // Create DAG nodes table
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS dag_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            node_key TEXT NOT NULL,
+            title TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            worker_identity TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            instructions TEXT NOT NULL,
+            acceptance_criteria_json TEXT NOT NULL,
+            target_files_json TEXT NOT NULL,
+            worktree_path TEXT,
+            session_id TEXT,
+            session_file TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            result_summary TEXT,
+            started_at DATETIME,
+            finished_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+            UNIQUE(job_id, node_key)
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    // Create DAG edges table
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS dag_edges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            from_node_id INTEGER NOT NULL,
+            to_node_id INTEGER NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+            FOREIGN KEY(from_node_id) REFERENCES dag_nodes(id) ON DELETE CASCADE,
+            FOREIGN KEY(to_node_id) REFERENCES dag_nodes(id) ON DELETE CASCADE,
+            UNIQUE(job_id, from_node_id, to_node_id)
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    // Create DAG runs table
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS dag_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            started_at DATETIME,
+            finished_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    // Create task artifacts table
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS task_artifacts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            node_id INTEGER NOT NULL,
+            artifact_type TEXT NOT NULL,
+            path TEXT,
+            content TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+            FOREIGN KEY(node_id) REFERENCES dag_nodes(id) ON DELETE CASCADE
         )",
     )
     .execute(&pool)
@@ -883,13 +1086,367 @@ pub async fn get_job_detail(pool: &Pool<Sqlite>, job_id: i64) -> Result<JobDetai
     let messages = get_job_messages(pool, job_id).await?;
     let clarifications = get_clarification_items(pool, job_id).await?;
     let task_drafts = get_task_drafts(pool, job_id).await?;
+    let dag_nodes = get_dag_nodes(pool, job_id).await?;
+    let dag_edges = get_dag_edges(pool, job_id).await?;
+    let task_artifacts = get_task_artifacts(pool, job_id).await?;
 
     Ok(JobDetail {
         job,
         messages,
         clarifications,
         task_drafts,
+        dag_nodes,
+        dag_edges,
+        task_artifacts,
     })
+}
+
+pub async fn apply_dag_plan(
+    pool: &Pool<Sqlite>,
+    job_id: i64,
+    nodes: Vec<DagNodeSeed>,
+    edges: Vec<DagEdgeSeed>,
+) -> Result<JobDetail> {
+    if nodes.is_empty() {
+        anyhow::bail!("DAG 至少需要一个节点");
+    }
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM task_artifacts WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM dag_edges WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM dag_nodes WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM dag_runs WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let mut node_ids = std::collections::HashMap::new();
+    for node in nodes {
+        let acceptance_json = serde_json::to_string(&node.acceptance_criteria)?;
+        let target_files_json = serde_json::to_string(&node.target_files)?;
+        let id = sqlx::query(
+            "INSERT INTO dag_nodes
+             (job_id, node_key, title, kind, worker_identity, status, instructions,
+              acceptance_criteria_json, target_files_json)
+             VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8)",
+        )
+        .bind(job_id)
+        .bind(&node.node_key)
+        .bind(&node.title)
+        .bind(&node.kind)
+        .bind(&node.worker_identity)
+        .bind(&node.instructions)
+        .bind(acceptance_json)
+        .bind(target_files_json)
+        .execute(&mut *tx)
+        .await?
+        .last_insert_rowid();
+        node_ids.insert(node.node_key, id);
+    }
+
+    for edge in edges {
+        let from_id = node_ids
+            .get(&edge.from_node_key)
+            .copied()
+            .with_context(|| format!("DAG 依赖源节点不存在: {}", edge.from_node_key))?;
+        let to_id = node_ids
+            .get(&edge.to_node_key)
+            .copied()
+            .with_context(|| format!("DAG 依赖目标节点不存在: {}", edge.to_node_key))?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO dag_edges (job_id, from_node_id, to_node_id)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(job_id)
+        .bind(from_id)
+        .bind(to_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    sqlx::query(
+        "INSERT INTO dag_runs (job_id, status, started_at)
+         VALUES ($1, 'pending', datetime('now'))",
+    )
+    .bind(job_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE jobs
+         SET status = 'dag_ready', current_stage = 'dag_execution', updated_at = datetime('now')
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO job_messages (job_id, role, content)
+         VALUES ($1, 'coordinator', '任务 DAG 已生成，准备执行。')",
+    )
+    .bind(job_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    get_job_detail(pool, job_id).await
+}
+
+pub async fn mark_job_dag_planning(pool: &Pool<Sqlite>, job_id: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE jobs
+         SET status = 'dag_planning', current_stage = 'dag_planning', updated_at = datetime('now')
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn mark_job_dag_planning_failed(
+    pool: &Pool<Sqlite>,
+    job_id: i64,
+    reason: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE jobs
+         SET status = 'dag_planning_failed', current_stage = 'dag_planning', updated_at = datetime('now')
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    insert_job_message(pool, job_id, "system", reason).await?;
+    Ok(())
+}
+
+pub async fn reset_job_for_replan(pool: &Pool<Sqlite>, job_id: i64) -> Result<JobDetail> {
+    let mut tx = pool.begin().await?;
+
+    // 删除 dag_nodes 会自动级联删除 dag_edges 和 task_artifacts
+    sqlx::query("DELETE FROM dag_nodes WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 删除 dag_runs
+    sqlx::query("DELETE FROM dag_runs WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 重置状态为 dag_planning
+    sqlx::query(
+        "UPDATE jobs
+         SET status = 'dag_planning', current_stage = 'dag_planning', updated_at = datetime('now')
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    insert_job_message(
+        pool,
+        job_id,
+        "system",
+        "重新规划 DAG，清理旧数据并重新生成任务拆分。",
+    )
+    .await?;
+
+    get_job_detail(pool, job_id).await
+}
+
+pub async fn mark_job_executing(pool: &Pool<Sqlite>, job_id: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE jobs
+         SET status = 'executing', current_stage = 'dag_execution', updated_at = datetime('now')
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE dag_runs
+         SET status = 'running', started_at = COALESCE(started_at, datetime('now')), updated_at = datetime('now')
+         WHERE job_id = $1 AND status IN ('pending', 'running')",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn resume_job_for_execution(pool: &Pool<Sqlite>, job_id: i64) -> Result<JobDetail> {
+    let mut tx = pool.begin().await?;
+
+    // 重置失败节点状态为 pending，清除错误信息
+    sqlx::query(
+        "UPDATE dag_nodes
+         SET status = 'pending',
+             error_message = NULL,
+             result_summary = NULL,
+             retry_count = retry_count + 1,
+             started_at = NULL,
+             finished_at = NULL,
+             updated_at = datetime('now')
+         WHERE job_id = $1 AND status = 'failed'",
+    )
+    .bind(job_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // 重置 job 状态为 executing
+    sqlx::query(
+        "UPDATE jobs
+         SET status = 'executing', current_stage = 'dag_execution', updated_at = datetime('now')
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    insert_job_message(pool, job_id, "system", "恢复 DAG 执行，从失败节点继续。").await?;
+
+    get_job_detail(pool, job_id).await
+}
+
+pub async fn mark_job_completed(pool: &Pool<Sqlite>, job_id: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE jobs
+         SET status = 'completed', current_stage = 'completed', archived_at = datetime('now'), updated_at = datetime('now')
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE dag_runs
+         SET status = 'succeeded', finished_at = datetime('now'), updated_at = datetime('now')
+         WHERE job_id = $1 AND status IN ('pending', 'running')",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    insert_job_message(pool, job_id, "system", "DAG 执行完成，任务已完成。").await?;
+    Ok(())
+}
+
+pub async fn mark_job_blocked(pool: &Pool<Sqlite>, job_id: i64, reason: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE jobs
+         SET status = 'blocked', current_stage = 'blocked', updated_at = datetime('now')
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE dag_runs
+         SET status = 'blocked', finished_at = datetime('now'), updated_at = datetime('now')
+         WHERE job_id = $1 AND status IN ('pending', 'running')",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    insert_job_message(pool, job_id, "system", reason).await?;
+    Ok(())
+}
+
+pub async fn update_dag_node_status(
+    pool: &Pool<Sqlite>,
+    node_id: i64,
+    status: &str,
+    result_summary: Option<&str>,
+    error_message: Option<&str>,
+) -> Result<()> {
+    let started_at_expr = if status == "running" {
+        "datetime('now')"
+    } else {
+        "started_at"
+    };
+    let finished_at_expr = if matches!(status, "succeeded" | "failed" | "blocked") {
+        "datetime('now')"
+    } else {
+        "finished_at"
+    };
+    let sql = format!(
+        "UPDATE dag_nodes
+         SET status = $1,
+             result_summary = $2,
+             error_message = $3,
+             started_at = {started_at_expr},
+             finished_at = {finished_at_expr},
+             updated_at = datetime('now')
+         WHERE id = $4"
+    );
+    sqlx::query(&sql)
+        .bind(status)
+        .bind(result_summary)
+        .bind(error_message)
+        .bind(node_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_dag_node_worktree(
+    pool: &Pool<Sqlite>,
+    node_id: i64,
+    worktree_path: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE dag_nodes
+         SET worktree_path = $1, updated_at = datetime('now')
+         WHERE id = $2",
+    )
+    .bind(worktree_path)
+    .bind(node_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn insert_task_artifact(
+    pool: &Pool<Sqlite>,
+    job_id: i64,
+    artifact: TaskArtifactSeed,
+) -> Result<TaskArtifact> {
+    let id = sqlx::query(
+        "INSERT INTO task_artifacts (job_id, node_id, artifact_type, path, content)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(job_id)
+    .bind(artifact.node_id)
+    .bind(&artifact.artifact_type)
+    .bind(&artifact.path)
+    .bind(&artifact.content)
+    .execute(pool)
+    .await?
+    .last_insert_rowid();
+
+    let row = sqlx::query_as::<_, TaskArtifactRow>(
+        "SELECT id, job_id, node_id, artifact_type, path, content, created_at
+         FROM task_artifacts WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+    TaskArtifact::try_from(row)
 }
 
 pub async fn submit_clarification_answers(
@@ -984,7 +1541,13 @@ pub async fn confirm_job(pool: &Pool<Sqlite>, job_id: i64) -> Result<JobDetail> 
     .execute(pool)
     .await?;
 
-    insert_job_message(pool, job_id, "system", "需求已确认，当前澄清会话已归档。").await?;
+    insert_job_message(
+        pool,
+        job_id,
+        "system",
+        "需求已确认，当前澄清会话已归档。后台将自动进入任务规划与执行。",
+    )
+    .await?;
 
     get_job_detail(pool, job_id).await
 }
@@ -1078,6 +1641,51 @@ async fn get_task_drafts(pool: &Pool<Sqlite>, job_id: i64) -> Result<Vec<TaskDra
     .await?;
 
     rows.into_iter().map(TaskDraft::try_from).collect()
+}
+
+pub async fn get_dag_nodes(pool: &Pool<Sqlite>, job_id: i64) -> Result<Vec<DagNode>> {
+    let rows = sqlx::query_as::<_, DagNodeRow>(
+        "SELECT id, job_id, node_key, title, kind, worker_identity, status, instructions,
+                acceptance_criteria_json, target_files_json, worktree_path, session_id,
+                session_file, retry_count, error_message, result_summary, started_at,
+                finished_at, created_at, updated_at
+         FROM dag_nodes
+         WHERE job_id = $1
+         ORDER BY id ASC",
+    )
+    .bind(job_id)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().map(DagNode::try_from).collect()
+}
+
+pub async fn get_dag_edges(pool: &Pool<Sqlite>, job_id: i64) -> Result<Vec<DagEdge>> {
+    let edges = sqlx::query_as::<_, DagEdge>(
+        "SELECT id, job_id, from_node_id, to_node_id, created_at
+         FROM dag_edges
+         WHERE job_id = $1
+         ORDER BY id ASC",
+    )
+    .bind(job_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(edges)
+}
+
+pub async fn get_task_artifacts(pool: &Pool<Sqlite>, job_id: i64) -> Result<Vec<TaskArtifact>> {
+    let rows = sqlx::query_as::<_, TaskArtifactRow>(
+        "SELECT id, job_id, node_id, artifact_type, path, content, created_at
+         FROM task_artifacts
+         WHERE job_id = $1
+         ORDER BY id ASC",
+    )
+    .bind(job_id)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().map(TaskArtifact::try_from).collect()
 }
 
 async fn insert_job_message(
@@ -1384,6 +1992,56 @@ impl TryFrom<TaskDraftRow> for TaskDraft {
             description: row.description,
             acceptance_criteria,
             status: row.status,
+            created_at: row.created_at,
+        })
+    }
+}
+
+impl TryFrom<DagNodeRow> for DagNode {
+    type Error = anyhow::Error;
+
+    fn try_from(row: DagNodeRow) -> Result<Self> {
+        let acceptance_criteria = serde_json::from_str(&row.acceptance_criteria_json)
+            .with_context(|| "解析 DAG 节点验收标准失败")?;
+        let target_files = serde_json::from_str(&row.target_files_json)
+            .with_context(|| "解析 DAG 节点目标文件失败")?;
+
+        Ok(Self {
+            id: row.id,
+            job_id: row.job_id,
+            node_key: row.node_key,
+            title: row.title,
+            kind: row.kind,
+            worker_identity: row.worker_identity,
+            status: row.status,
+            instructions: row.instructions,
+            acceptance_criteria,
+            target_files,
+            worktree_path: row.worktree_path,
+            session_id: row.session_id,
+            session_file: row.session_file,
+            retry_count: row.retry_count,
+            error_message: row.error_message,
+            result_summary: row.result_summary,
+            started_at: row.started_at,
+            finished_at: row.finished_at,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        })
+    }
+}
+
+impl TryFrom<TaskArtifactRow> for TaskArtifact {
+    type Error = anyhow::Error;
+
+    fn try_from(row: TaskArtifactRow) -> Result<Self> {
+        Ok(Self {
+            id: row.id,
+            job_id: row.job_id,
+            node_id: row.node_id,
+            artifact_type: row.artifact_type,
+            path: row.path,
+            content: row.content,
             created_at: row.created_at,
         })
     }

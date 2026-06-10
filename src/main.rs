@@ -24,7 +24,9 @@ use tracing::{info, warn};
 
 mod coordinator;
 mod db;
+mod executor;
 mod pi_rpc;
+mod planner;
 
 const PORT: u16 = 3003;
 
@@ -60,7 +62,9 @@ struct AppState {
     job_pi_clients: Arc<tokio::sync::Mutex<HashMap<i64, Arc<pi_rpc::PiRpcClient>>>>,
     workspace_dir: PathBuf,
     pi_session_dir: PathBuf,
-    extension_path: Option<PathBuf>,
+    coordinator_extension_path: Option<PathBuf>,
+    dag_planner_extension_path: Option<PathBuf>,
+    worker_extension_path: Option<PathBuf>,
     event_tx: EventSender,
     project_event_tx: ProjectEventSender,
 }
@@ -90,7 +94,7 @@ impl AppState {
 
         let client = pi_rpc::PiRpcClient::new_with_extension(
             &self.pi_session_dir,
-            self.extension_path.as_deref(),
+            self.coordinator_extension_path.as_deref(),
             Some(&cwd),
         )
         .await
@@ -102,6 +106,38 @@ impl AppState {
 
         info!("为 job {} 启动 Pi Agent，cwd: {}", job_id, cwd.display());
         Ok(client)
+    }
+
+    async fn start_dag_planner_pi_client(
+        &self,
+        job_id: i64,
+        project_id: i64,
+    ) -> anyhow::Result<Arc<pi_rpc::PiRpcClient>> {
+        let project = db::get_project(&self.pool, project_id).await?;
+        let local_path = project
+            .local_path
+            .as_deref()
+            .context("项目尚未克隆到本地，无法启动 DAG Planner")?;
+        let cwd = PathBuf::from(local_path);
+        anyhow::ensure!(cwd.exists(), "项目本地目录不存在: {}", cwd.display());
+        let ext = self
+            .dag_planner_extension_path
+            .as_deref()
+            .context("DAG Planner 扩展未找到，无法生成 DAG")?;
+        let session_dir = self
+            .pi_session_dir
+            .join("planner")
+            .join(format!("job-{job_id}"));
+        let client = pi_rpc::PiRpcClient::new_with_extension(&session_dir, Some(ext), Some(&cwd))
+            .await
+            .with_context(|| format!("启动 job {} 的 DAG Planner 失败", job_id))?;
+        info!(
+            "为 job {} 启动 DAG Planner，扩展: {}, cwd: {}",
+            job_id,
+            ext.display(),
+            cwd.display()
+        );
+        Ok(Arc::new(client))
     }
 
     /// 关闭指定 job 的 Pi Agent 进程。
@@ -194,18 +230,36 @@ async fn main() -> Result<()> {
     }
 
     // 扩展路径使用 db_dir 作为基准，确保开发和生产环境行为一致。
-    // db_dir 在开发时为项目根目录，生产时为可执行文件同级目录。
-    let ext_candidate = db_dir.join("pi-extensions/coordinator-decision.ts");
-    let extension_path = ext_candidate.exists().then_some(ext_candidate);
-    if let Some(ref p) = extension_path {
-        info!("加载 Coordinator 扩展: {}", p.display());
+    let extension_dir = db_dir.join("pi-extensions");
+    let coordinator_extension_path = extension_dir
+        .join("coordinator-decision.ts")
+        .exists()
+        .then_some(extension_dir.join("coordinator-decision.ts"));
+    let dag_planner_extension_path = extension_dir
+        .join("dag-planner.ts")
+        .exists()
+        .then_some(extension_dir.join("dag-planner.ts"));
+    let worker_extension_path = extension_dir
+        .join("worker-tools.ts")
+        .exists()
+        .then_some(extension_dir.join("worker-tools.ts"));
+    if let Some(ref p) = coordinator_extension_path {
+        info!("加载需求分析扩展: {}", p.display());
     } else {
-        warn!("Coordinator 扩展未找到，将使用文本解析 fallback");
+        warn!("需求分析扩展未找到，将使用文本解析 fallback");
+    }
+    if let Some(ref p) = dag_planner_extension_path {
+        info!("加载 DAG Planner 扩展: {}", p.display());
+    } else {
+        warn!("DAG Planner 扩展未找到，确认后 DAG 规划会失败");
+    }
+    if let Some(ref p) = worker_extension_path {
+        info!("加载 Worker 扩展: {}", p.display());
     }
     let coordinator_session_dir = pi_session_dir.join("coordinator");
     let pi_client = match pi_rpc::PiRpcClient::new_with_extension(
         &coordinator_session_dir,
-        extension_path.as_deref(),
+        coordinator_extension_path.as_deref(),
         None,
     )
     .await
@@ -228,7 +282,9 @@ async fn main() -> Result<()> {
         job_pi_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         workspace_dir: workspace_dir.clone(),
         pi_session_dir: pi_session_dir.clone(),
-        extension_path: extension_path.clone(),
+        coordinator_extension_path: coordinator_extension_path.clone(),
+        dag_planner_extension_path: dag_planner_extension_path.clone(),
+        worker_extension_path: worker_extension_path.clone(),
         event_tx: event_tx.clone(),
         project_event_tx: project_event_tx.clone(),
     });
@@ -265,6 +321,9 @@ fn create_router(state: Arc<AppState>) -> Router {
             "/api/jobs/:id/clarifications",
             post(submit_clarifications_handler),
         )
+        .route("/api/jobs/:id/dag", get(get_job_dag_handler))
+        .route("/api/jobs/:id/replan", post(replan_job_handler))
+        .route("/api/jobs/:id/resume", post(resume_job_handler))
         .route("/api/jobs/:id/confirm", post(confirm_job_handler))
         .route("/api/jobs/:id/messages", post(append_job_message_handler))
         .route("/api/projects/:id", delete(delete_project_handler))
@@ -954,14 +1013,146 @@ async fn confirm_job_handler(
                 &state.event_tx,
                 job_id,
                 "archived",
-                "需求已确认，会话已归档。",
+                "需求已确认，会话已归档。后台开始任务规划。",
             );
+            let project_id = detail.job.project_id;
             state.shutdown_job_pi_client(job_id).await;
+            let pi_client = match state.start_dag_planner_pi_client(job_id, project_id).await {
+                Ok(client) => client,
+                Err(e) => {
+                    warn!("启动 DAG 规划 Pi Agent 失败: {}", e);
+                    let _ =
+                        db::mark_job_dag_planning_failed(&state.pool, job_id, &e.to_string()).await;
+                    return Json(ApiResponse::err(format!("DAG Planner 启动失败: {}", e)));
+                }
+            };
+            spawn_dag_planning(
+                state.pool.clone(),
+                pi_client,
+                state.event_tx.clone(),
+                job_id,
+                project_id,
+                state.clone(),
+            );
             Json(ApiResponse::ok(detail))
         }
         Err(e) => {
             warn!("确认 Job 失败: {}", e);
             Json(ApiResponse::err(format!("确认失败: {}", e)))
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobDagPayload {
+    dag_nodes: Vec<db::DagNode>,
+    dag_edges: Vec<db::DagEdge>,
+    task_artifacts: Vec<db::TaskArtifact>,
+}
+
+async fn replan_job_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(job_id): Path<i64>,
+) -> Json<ApiResponse<db::JobDetail>> {
+    let job = match db::get_job(&state.pool, job_id).await {
+        Ok(j) => j,
+        Err(e) => {
+            warn!("获取 Job 失败: {}", e);
+            return Json(ApiResponse::err(format!("获取 Job 失败: {}", e)));
+        }
+    };
+
+    if job.status != "dag_planning_failed" {
+        return Json(ApiResponse::err("只有规划失败的任务才能重新规划"));
+    }
+
+    match db::reset_job_for_replan(&state.pool, job_id).await {
+        Ok(detail) => {
+            let project_id = detail.job.project_id;
+            let pi_client = match state.start_dag_planner_pi_client(job_id, project_id).await {
+                Ok(client) => client,
+                Err(e) => {
+                    warn!("启动 DAG 规划 Pi Agent 失败: {}", e);
+                    let _ =
+                        db::mark_job_dag_planning_failed(&state.pool, job_id, &e.to_string()).await;
+                    return Json(ApiResponse::err(format!("DAG Planner 启动失败: {}", e)));
+                }
+            };
+            spawn_dag_planning(
+                state.pool.clone(),
+                pi_client,
+                state.event_tx.clone(),
+                job_id,
+                project_id,
+                state.clone(),
+            );
+            Json(ApiResponse::ok(detail))
+        }
+        Err(e) => {
+            warn!("重新规划失败: {}", e);
+            Json(ApiResponse::err(format!("重新规划失败: {}", e)))
+        }
+    }
+}
+
+async fn resume_job_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(job_id): Path<i64>,
+) -> Json<ApiResponse<db::JobDetail>> {
+    let job = match db::get_job(&state.pool, job_id).await {
+        Ok(j) => j,
+        Err(e) => {
+            warn!("获取 Job 失败: {}", e);
+            return Json(ApiResponse::err(format!("获取 Job 失败: {}", e)));
+        }
+    };
+
+    if job.status != "blocked" {
+        return Json(ApiResponse::err("只有阻塞状态的任务才能恢复执行"));
+    }
+
+    match db::resume_job_for_execution(&state.pool, job_id).await {
+        Ok(detail) => {
+            let project_id = detail.job.project_id;
+            let local_path = match db::get_project(&state.pool, project_id).await {
+                Ok(p) => p.local_path.unwrap_or_default(),
+                Err(e) => {
+                    warn!("获取项目失败: {}", e);
+                    return Json(ApiResponse::err(format!("获取项目失败: {}", e)));
+                }
+            };
+
+            spawn_dag_execution(
+                state.pool.clone(),
+                state.event_tx.clone(),
+                job_id,
+                project_id,
+                local_path,
+                state.clone(),
+            );
+            Json(ApiResponse::ok(detail))
+        }
+        Err(e) => {
+            warn!("恢复执行失败: {}", e);
+            Json(ApiResponse::err(format!("恢复执行失败: {}", e)))
+        }
+    }
+}
+
+async fn get_job_dag_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(job_id): Path<i64>,
+) -> Json<ApiResponse<JobDagPayload>> {
+    match db::get_job_detail(&state.pool, job_id).await {
+        Ok(detail) => Json(ApiResponse::ok(JobDagPayload {
+            dag_nodes: detail.dag_nodes,
+            dag_edges: detail.dag_edges,
+            task_artifacts: detail.task_artifacts,
+        })),
+        Err(e) => {
+            warn!("获取 DAG 失败: {}", e);
+            Json(ApiResponse::err(format!("获取 DAG 失败: {}", e)))
         }
     }
 }
@@ -1151,6 +1342,218 @@ fn spawn_followup_analysis(
     });
 }
 
+fn spawn_dag_planning(
+    pool: Pool<Sqlite>,
+    pi_client: Arc<pi_rpc::PiRpcClient>,
+    event_tx: EventSender,
+    job_id: i64,
+    project_id: i64,
+    state: Arc<AppState>,
+) {
+    tokio::spawn(async move {
+        if let Err(e) =
+            run_dag_planning_and_execution(&pool, &pi_client, &event_tx, job_id, project_id, &state)
+                .await
+        {
+            let err_msg = e.to_string();
+            warn!("DAG 规划或执行失败: {}", err_msg);
+            if let Err(db_err) = db::mark_job_dag_planning_failed(&pool, job_id, &err_msg).await {
+                warn!("标记 job 为 dag_planning_failed 失败: {}", db_err);
+            }
+            emit_job_event(&event_tx, job_id, "error", &format!("DAG 失败: {err_msg}"));
+        }
+        if let Err(e) = pi_client.shutdown().await {
+            warn!("关闭 DAG Planner Pi Agent 失败: {}", e);
+        }
+    });
+}
+
+fn spawn_dag_execution(
+    pool: Pool<Sqlite>,
+    event_tx: EventSender,
+    job_id: i64,
+    _project_id: i64,
+    local_path: String,
+    state: Arc<AppState>,
+) {
+    tokio::spawn(async move {
+        emit_job_event(
+            &event_tx,
+            job_id,
+            "dag_execution_started",
+            "恢复 DAG 执行。",
+        );
+
+        let result = executor::execute_dag(
+            &pool,
+            job_id,
+            FsPath::new(&local_path),
+            &state.workspace_dir,
+            &state.pi_session_dir,
+            state.worker_extension_path.as_deref(),
+            |update| {
+                emit_job_event_with_payload(
+                    &event_tx,
+                    job_id,
+                    "dag_node_update",
+                    &update.message,
+                    json!({
+                        "nodeId": update.node_id,
+                        "status": update.status,
+                    }),
+                );
+            },
+        )
+        .await;
+
+        match result {
+            Ok(()) => {
+                let detail = match db::get_job_detail(&pool, job_id).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        warn!("获取 Job 详情失败: {}", e);
+                        return;
+                    }
+                };
+                emit_job_event_with_payload(
+                    &event_tx,
+                    job_id,
+                    if detail.job.status == "completed" {
+                        "dag_completed"
+                    } else {
+                        "dag_blocked"
+                    },
+                    if detail.job.status == "completed" {
+                        "DAG 执行完成。"
+                    } else {
+                        "DAG 执行被阻塞。"
+                    },
+                    json!({
+                        "dagNodes": detail.dag_nodes,
+                        "dagEdges": detail.dag_edges,
+                        "taskArtifacts": detail.task_artifacts,
+                    }),
+                );
+            }
+            Err(e) => {
+                let err_msg = e.to_string();
+                warn!("DAG 执行失败: {}", err_msg);
+                emit_job_event(
+                    &event_tx,
+                    job_id,
+                    "error",
+                    &format!("DAG 执行失败: {err_msg}"),
+                );
+            }
+        }
+    });
+}
+
+async fn run_dag_planning_and_execution(
+    pool: &Pool<Sqlite>,
+    pi_client: &pi_rpc::PiRpcClient,
+    event_tx: &EventSender,
+    job_id: i64,
+    project_id: i64,
+    state: &AppState,
+) -> Result<()> {
+    db::mark_job_dag_planning(pool, job_id).await?;
+    emit_job_event(
+        event_tx,
+        job_id,
+        "dag_planning_started",
+        "开始生成任务 DAG。",
+    );
+    let detail = db::get_job_detail(pool, job_id).await?;
+    let draft = detail
+        .task_drafts
+        .first()
+        .context("当前 Job 缺少确认需求卡片")?;
+    let system_config = db::get_system_config(pool).await?;
+    let thinking_level = db::get_task_thinking_level(pool, "architecture_design")
+        .await
+        .unwrap_or_else(|_| "high".to_string());
+    let project_ctx = build_project_context(pool, project_id).await.ok();
+    let mut pi_events = Vec::new();
+    let mut pi_event_sink = |event: Value| {
+        pi_events.push(event.clone());
+        emit_pi_job_event(event_tx, job_id, event);
+    };
+
+    let plan = planner::generate_dag_plan(
+        pi_client,
+        &system_config,
+        &thinking_level,
+        draft,
+        project_ctx.as_ref(),
+        &mut pi_event_sink,
+    )
+    .await?;
+    persist_pi_trace(pool, job_id, &pi_events).await?;
+
+    let detail = db::apply_dag_plan(pool, job_id, plan.nodes, plan.edges).await?;
+    emit_job_event_with_payload(
+        event_tx,
+        job_id,
+        "dag_ready",
+        "任务 DAG 已生成。",
+        json!({
+            "dagNodes": detail.dag_nodes,
+            "dagEdges": detail.dag_edges,
+            "taskArtifacts": detail.task_artifacts,
+        }),
+    );
+
+    let project = db::get_project(pool, project_id).await?;
+    let local_path = project
+        .local_path
+        .as_deref()
+        .context("项目尚未克隆到本地，无法执行 DAG")?;
+    executor::execute_dag(
+        pool,
+        job_id,
+        FsPath::new(local_path),
+        &state.workspace_dir,
+        &state.pi_session_dir,
+        state.worker_extension_path.as_deref(),
+        |update| {
+            emit_job_event_with_payload(
+                event_tx,
+                job_id,
+                "dag_node_update",
+                &update.message,
+                json!({
+                    "nodeId": update.node_id,
+                    "status": update.status,
+                }),
+            );
+        },
+    )
+    .await?;
+
+    let detail = db::get_job_detail(pool, job_id).await?;
+    emit_job_event_with_payload(
+        event_tx,
+        job_id,
+        if detail.job.status == "completed" {
+            "dag_completed"
+        } else {
+            "dag_blocked"
+        },
+        if detail.job.status == "completed" {
+            "DAG 执行完成。"
+        } else {
+            "DAG 执行被阻塞。"
+        },
+        json!({
+            "dagNodes": detail.dag_nodes,
+            "dagEdges": detail.dag_edges,
+            "taskArtifacts": detail.task_artifacts,
+        }),
+    );
+    Ok(())
+}
+
 async fn build_project_context(
     pool: &Pool<Sqlite>,
     project_id: i64,
@@ -1330,6 +1733,22 @@ fn emit_job_event(event_tx: &EventSender, job_id: i64, event: &str, message: &st
         message: message.to_string(),
         pi_type: None,
         payload: None,
+    });
+}
+
+fn emit_job_event_with_payload(
+    event_tx: &EventSender,
+    job_id: i64,
+    event: &str,
+    message: &str,
+    payload: Value,
+) {
+    let _ = event_tx.send(JobEvent {
+        job_id,
+        event: event.to_string(),
+        message: message.to_string(),
+        pi_type: None,
+        payload: Some(payload),
     });
 }
 
@@ -2122,5 +2541,18 @@ mod tests {
         assert_eq!(metadata["trace"]["tools"][0]["toolName"], "bash");
         assert_eq!(metadata["trace"]["tools"][0]["output"], "cargo test");
         assert_eq!(metadata["summary"]["toolCount"], 1);
+    }
+
+    #[test]
+    fn pi_extensions_keep_requirement_and_dag_tools_separate() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let coordinator_ext =
+            fs::read_to_string(root.join("pi-extensions/coordinator-decision.ts")).unwrap();
+        let dag_ext = fs::read_to_string(root.join("pi-extensions/dag-planner.ts")).unwrap();
+
+        assert!(coordinator_ext.contains("submit_coordinator_decision"));
+        assert!(!coordinator_ext.contains("submit_dag_plan"));
+        assert!(dag_ext.contains("submit_dag_plan"));
+        assert!(!dag_ext.contains("submit_coordinator_decision"));
     }
 }

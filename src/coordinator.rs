@@ -15,7 +15,7 @@ pub struct ProjectContext {
 }
 
 impl ProjectContext {
-    fn format_for_prompt(&self) -> String {
+    pub(crate) fn format_for_prompt(&self) -> String {
         format!(
             "- 项目名称：{}\n- Git 仓库：{}\n- 本地路径：{}\n",
             self.name, self.git_url, self.local_path
@@ -23,7 +23,7 @@ impl ProjectContext {
     }
 }
 
-const GENERATION_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(60);
+const GENERATION_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(1500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoordinatorStatus {
@@ -84,6 +84,35 @@ struct GeneratedDraft {
 fn default_allow_custom() -> bool {
     true
 }
+
+const COORDINATOR_SHARED_GUIDELINES: &str = r#"## 语言规范
+
+- 所有可展示给用户或会被前端记录的内容都必须使用简体中文，包括 thinking、progress、clarifications、options、draft.title、draft.summary 和 acceptanceCriteria。
+- 不要输出英文思考、英文过程说明或中英混杂的分析文本；技术名词、文件名、API 名称可以保留原文。
+- progress 只写可展示给用户的过程摘要，不输出隐藏思考链。
+
+## 稳定决策准则
+
+按同一套清单判断需求是否足够明确，避免同一个需求在不同运行中结论漂移：
+
+1. 目标：用户要达成的效果是否清楚。
+2. 范围：要改的模块、页面、接口或行为边界是否能从需求或项目上下文判断。
+3. 验收：完成后如何验证是否能用测试、构建、静态检查或明确的人工步骤表达。
+4. 约束：技术栈、兼容性、数据迁移、安全边界、性能要求是否存在会改变实现路径的不确定点。
+5. 风险：如果直接实现，是否可能做出高成本、不可逆或明显偏离用户意图的选择。
+
+只有当不确定点会影响实现路径、验收标准、数据兼容或安全边界时，才返回 status=needs_clarification。
+如果缺失信息可以按项目既有惯例、最小可行范围或安全默认值处理，返回 status=ready，并在 draft.summary 或 acceptanceCriteria 中写明默认假设。
+不要询问已经能从用户需求、项目上下文或常规工程惯例明确得到的信息。
+
+## 澄清策略
+
+- status=needs_clarification 时，只提出当前阶段最关键的 1 到 6 个问题。
+- 优先使用 single_choice 或 multi_choice，并提供 2 到 4 个互斥且有实际取舍的选项。
+- 推荐项最多 1 个，且推荐项应放在 options 的第一个位置。
+- 禁止生成低信息选项，例如“是 / 否 / 其他”“方案一 / 方案二”，除非问题本身确实是二选一。
+- free_text 只用于无法合理枚举选项的开放问题，options 使用空数组。
+"#;
 
 pub async fn start_requirement_analysis(
     pi_client: &PiRpcClient,
@@ -304,6 +333,7 @@ fn build_initial_prompt(requirement: &str, project_context: Option<&ProjectConte
             )
         })
         .unwrap_or_default();
+    let shared_guidelines = COORDINATOR_SHARED_GUIDELINES;
 
     format!(
         r#"你是 raccoon 的 Coordinator，负责把用户需求整理为后续执行前的确认需求。
@@ -311,9 +341,9 @@ fn build_initial_prompt(requirement: &str, project_context: Option<&ProjectConte
 如果你看到 submit_coordinator_decision 工具可用，请**优先调用该工具**提交你的分析决策。
 如果工具不可用，请**只输出一个 JSON 对象**，不要 Markdown，不要解释，不要代码块。
 
-你必须先判断需求是否已经足够清晰：
-- 如果目标、范围、验收方式已经足够明确，返回 status=ready，并生成 draft。
-- 如果仍有会影响实现路径或验收的关键不确定点，返回 status=needs_clarification，并生成 1 到 6 个澄清问题。
+你必须先按固定标准判断需求是否已经足够清晰。
+
+{shared_guidelines}
 
 {project_section}
 ## 输出 JSON 结构
@@ -351,8 +381,8 @@ fn build_initial_prompt(requirement: &str, project_context: Option<&ProjectConte
 3. **single_choice / multi_choice 必须提供 2 到 4 个选项** —— 绝对不能少于 2 个，也绝对不能多于 4 个。
 4. **free_text 可以没有 options**（options 为空数组）。
 5. **每个选择题最多只能有 1 个 recommended=true** —— 绝对不能标记 2 个或以上为 recommended。
-6. 不要询问已经能从需求中明确得到的信息。
-7. progress 只写可展示给用户的过程摘要，不输出隐藏思考链。
+6. 所有字符串字段必须使用简体中文，技术名词、文件名、API 名称除外。
+7. 选择题的推荐选项如果存在，必须放在 options 第一个位置。
 
 ## 示例输出（needs_clarification）
 
@@ -402,17 +432,18 @@ fn build_followup_prompt(answer_summary: &str, project_context: Option<&ProjectC
             )
         })
         .unwrap_or_default();
+    let shared_guidelines = COORDINATOR_SHARED_GUIDELINES;
 
     format!(
         r#"用户已经回答了上一轮澄清问题：
 {answer_summary}
 {project_section}
-请基于当前完整上下文继续判断：
-- 如果仍有关键不确定点，返回 status=needs_clarification，并给出 1 到 6 个新的澄清问题。
-- 如果需求已经足够清楚，返回 status=ready，并生成 draft。
+请基于当前完整上下文，继续按固定标准判断需求是否已经足够清晰。
 
 如果你看到 submit_coordinator_decision 工具可用，请**优先调用该工具**提交你的分析决策。
 如果工具不可用，请**只输出一个 JSON 对象**，不要 Markdown，不要解释，不要代码块。
+
+{shared_guidelines}
 
 ## 输出 JSON 结构（与初始分析相同）
 
@@ -449,7 +480,8 @@ fn build_followup_prompt(answer_summary: &str, project_context: Option<&ProjectC
 3. **single_choice / multi_choice 必须提供 2 到 4 个选项** —— 绝对不能少于 2 个，也绝对不能多于 4 个。
 4. **free_text 可以没有 options**（options 为空数组）。
 5. **每个选择题最多只能有 1 个 recommended=true** —— 绝对不能标记 2 个或以上为 recommended。
-6. progress 只写可展示给用户的过程摘要。
+6. 所有字符串字段必须使用简体中文，技术名词、文件名、API 名称除外。
+7. 选择题的推荐选项如果存在，必须放在 options 第一个位置。
 
 ## 示例输出（ready）
 
@@ -777,6 +809,41 @@ fn empty_session() -> RpcSessionState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_prompt_contains_stable_chinese_guidelines() {
+        let prompt = build_initial_prompt("实现需求分析优化", None);
+
+        assert!(prompt.contains("所有可展示给用户或会被前端记录的内容都必须使用简体中文"));
+        assert!(prompt.contains("不要输出英文思考、英文过程说明或中英混杂的分析文本"));
+        assert!(prompt.contains("## 稳定决策准则"));
+        assert!(prompt.contains("只有当不确定点会影响实现路径、验收标准、数据兼容或安全边界时"));
+        assert!(prompt.contains("选择题的推荐选项如果存在，必须放在 options 第一个位置"));
+    }
+
+    #[test]
+    fn followup_prompt_reuses_stable_chinese_guidelines() {
+        let prompt = build_followup_prompt("已选择最小可行范围。", None);
+
+        assert!(prompt.contains("所有可展示给用户或会被前端记录的内容都必须使用简体中文"));
+        assert!(prompt.contains("## 稳定决策准则"));
+        assert!(prompt.contains("目标：用户要达成的效果是否清楚"));
+        assert!(prompt.contains("如果缺失信息可以按项目既有惯例、最小可行范围或安全默认值处理"));
+        assert!(prompt.contains("所有字符串字段必须使用简体中文"));
+    }
+
+    #[test]
+    fn prompts_define_clarification_option_quality_rules() {
+        let initial_prompt = build_initial_prompt("新增导出功能", None);
+        let followup_prompt = build_followup_prompt("用户选择 CSV 导出。", None);
+
+        for prompt in [initial_prompt, followup_prompt] {
+            assert!(prompt.contains("single_choice / multi_choice 必须提供 2 到 4 个选项"));
+            assert!(prompt.contains("提供 2 到 4 个互斥且有实际取舍的选项"));
+            assert!(prompt.contains("推荐项最多 1 个"));
+            assert!(prompt.contains("禁止生成低信息选项"));
+        }
+    }
 
     #[test]
     fn parse_ready_decision_without_clarifications() {

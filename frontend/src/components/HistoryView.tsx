@@ -23,7 +23,17 @@ export function HistoryView({ projectId, onBack }: HistoryViewProps) {
   const [loading, setLoading] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
 
-  const archivedJobs = jobs.filter((job) => job.status === "archived");
+  const archivedJobs = jobs.filter((job) =>
+    [
+      "archived",
+      "dag_planning",
+      "dag_planning_failed",
+      "dag_ready",
+      "executing",
+      "completed",
+      "blocked",
+    ].includes(job.status),
+  );
   const selectedJob = jobs.find((job) => job.id === selectedJobId) || null;
 
   const loadJobs = useCallback(async () => {

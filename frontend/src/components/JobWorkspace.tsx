@@ -32,6 +32,13 @@ interface JobWorkspaceProps {
   projectId: number;
 }
 
+const CHAT_STATUSES = new Set([
+  "analyzing",
+  "clarifying",
+  "draft_ready",
+  "failed",
+]);
+
 export function JobWorkspace({ projectId }: JobWorkspaceProps) {
   const { sendWithEnter } = useAppStore();
   const isMac = useMemo(
@@ -62,15 +69,15 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
 
   const selectedJob = useMemo(
     () =>
-      (jobDetail?.job.id === selectedJobId ? jobDetail.job : null) ||
-      jobs.find((job) => job.id === selectedJobId) ||
-      null,
+      [
+        jobDetail?.job.id === selectedJobId ? jobDetail.job : null,
+        jobs.find((job) => job.id === selectedJobId) || null,
+      ].find((job) => job && CHAT_STATUSES.has(job.status)) || null,
     [jobDetail, jobs, selectedJobId],
   );
 
-  // 只显示活跃 job（仅排除归档的）
   const activeJobs = useMemo(
-    () => jobs.filter((job) => job.status !== "archived"),
+    () => jobs.filter((job) => CHAT_STATUSES.has(job.status)),
     [jobs],
   );
 
@@ -86,7 +93,14 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
     try {
       const data = await fetchProjectJobs(projectId, true);
       setJobs(data);
-      const active = data.filter((job) => job.status !== "archived");
+      const active = data.filter((job) => CHAT_STATUSES.has(job.status));
+      if (
+        selectedJobId !== null &&
+        !active.some((job) => job.id === selectedJobId)
+      ) {
+        setSelectedJobId(null);
+        setJobDetail(null);
+      }
       if (active.length > 0 && selectedJobId === null) {
         // 选中最近更新的活跃 job
         const latest = active.reduce((a, b) =>
@@ -170,7 +184,11 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
     source.addEventListener("coordinator_progress", handleStreamEvent);
     source.addEventListener("clarifications_ready", handleStreamEvent);
     source.addEventListener("task_draft_ready", handleStreamEvent);
-    source.addEventListener("archived", handleStreamEvent);
+    source.addEventListener("dag_planning_started", handleStreamEvent);
+    source.addEventListener("dag_ready", handleStreamEvent);
+    source.addEventListener("dag_node_update", handleStreamEvent);
+    source.addEventListener("dag_completed", handleStreamEvent);
+    source.addEventListener("dag_blocked", handleStreamEvent);
     source.addEventListener("pi_event", handleStreamEvent);
     source.addEventListener("error", (event) => {
       const maybeMessage = event as MessageEvent;
@@ -489,12 +507,9 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
     try {
       const detail = await confirmJob(selectedJob.id);
       applyDetail(detail);
-      setSelectedJobId(null);
-      setJobDetail(null);
-      setAnswers({});
       setStreamMessages([]);
       prevRoundRef.current = 0;
-      setMessage({ type: "success", text: "需求已确认，会话已归档" });
+      setMessage({ type: "success", text: "需求已确认，正在生成任务 DAG" });
       void loadJobs();
     } catch (err) {
       setMessage({
@@ -538,7 +553,17 @@ export function JobWorkspace({ projectId }: JobWorkspaceProps) {
   const isAwaitingUserAction =
     selectedJob?.status === "clarifying" ||
     selectedJob?.status === "draft_ready";
-  const canAppend = selectedJob && selectedJob.status !== "archived";
+  const canAppend =
+    selectedJob &&
+    ![
+      "archived",
+      "dag_planning",
+      "dag_planning_failed",
+      "dag_ready",
+      "executing",
+      "completed",
+      "blocked",
+    ].includes(selectedJob.status);
   const inputDisabled =
     creating || appending || isProcessing || isAwaitingUserAction;
 

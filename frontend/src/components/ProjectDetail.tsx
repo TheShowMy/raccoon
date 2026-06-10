@@ -6,11 +6,13 @@ import {
   FolderGit,
   ClipboardCheck,
   MessageSquare,
+  Network,
 } from "lucide-react";
 import type { Project } from "../stores/useAppStore";
 import { parseGitRepoUrl, parseGitHost } from "../utils/format";
 import { JobWorkspace } from "./JobWorkspace";
 import { HistoryView } from "./HistoryView";
+import { ExecutionCenter } from "./ExecutionCenter";
 
 interface ProjectDetailProps {
   project: Project;
@@ -18,9 +20,9 @@ interface ProjectDetailProps {
 }
 
 export function ProjectDetail({ project, onDelete }: ProjectDetailProps) {
-  const [viewMode, setViewMode] = useState<"workspace" | "history">(
-    "workspace",
-  );
+  const [viewMode, setViewMode] = useState<
+    "workspace" | "execution" | "history"
+  >("workspace");
   const repoPath = parseGitRepoUrl(project.gitUrl);
   const host = parseGitHost(project.gitUrl);
 
@@ -91,6 +93,17 @@ export function ProjectDetail({ project, onDelete }: ProjectDetailProps) {
             任务工作台
           </button>
           <button
+            onClick={() => setViewMode("execution")}
+            className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition border-b-2 ${
+              viewMode === "execution"
+                ? "border-violet-500 text-violet-700"
+                : "border-transparent text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            <Network className="h-3.5 w-3.5" />
+            执行中心
+          </button>
+          <button
             onClick={() => setViewMode("history")}
             className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition border-b-2 ${
               viewMode === "history"
@@ -108,6 +121,11 @@ export function ProjectDetail({ project, onDelete }: ProjectDetailProps) {
         <div className="mx-auto h-full max-w-6xl">
           {viewMode === "workspace" ? (
             <JobWorkspace projectId={project.id} />
+          ) : viewMode === "execution" ? (
+            <ExecutionCenter
+              projectId={project.id}
+              onBack={() => setViewMode("workspace")}
+            />
           ) : (
             <HistoryView
               projectId={project.id}

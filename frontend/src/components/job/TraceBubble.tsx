@@ -20,8 +20,8 @@ export function TraceBubble({ bubbles, isLive }: TraceBubbleProps) {
   if (!hasContent) return null;
 
   return (
-    <div className="flex justify-start">
-      <div className="w-full max-w-[78%] overflow-hidden rounded-lg border border-slate-100 bg-slate-50/80 shadow-sm">
+    <div className="flex w-full justify-center">
+      <div className="w-full overflow-hidden rounded-lg border border-slate-100 bg-slate-50/80 shadow-sm">
         <TraceHeader
           bubbles={bubbles}
           expanded={expanded}
@@ -113,7 +113,7 @@ function BubbleContainer({
     <div
       ref={containerRef}
       onScroll={handleScroll}
-      className={`space-y-2 overflow-y-auto scroll-smooth px-3 pb-3 ${isLive ? "" : "max-h-[500px]"}`}
+      className="max-h-[min(500px,50vh)] space-y-2 overflow-y-auto scroll-smooth px-3 pb-3"
     >
       {bubbles.map((bubble) => (
         <BubbleItem key={bubble.id} bubble={bubble} isLive={isLive} />

@@ -186,6 +186,12 @@ export type JobStatus =
   | "analyzing"
   | "clarifying"
   | "draft_ready"
+  | "dag_planning"
+  | "dag_planning_failed"
+  | "dag_ready"
+  | "executing"
+  | "completed"
+  | "blocked"
   | "archived"
   | "failed"
   | string;
@@ -247,11 +253,62 @@ export interface TaskDraft {
   createdAt: string;
 }
 
+export interface DagNode {
+  id: number;
+  jobId: number;
+  nodeKey: string;
+  title: string;
+  kind: string;
+  workerIdentity: string;
+  status:
+    | "pending"
+    | "ready"
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "blocked"
+    | string;
+  instructions: string;
+  acceptanceCriteria: string[];
+  targetFiles: string[];
+  worktreePath?: string | null;
+  sessionId?: string | null;
+  sessionFile?: string | null;
+  retryCount: number;
+  errorMessage?: string | null;
+  resultSummary?: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DagEdge {
+  id: number;
+  jobId: number;
+  fromNodeId: number;
+  toNodeId: number;
+  createdAt: string;
+}
+
+export interface TaskArtifact {
+  id: number;
+  jobId: number;
+  nodeId: number;
+  artifactType: string;
+  path?: string | null;
+  content: string;
+  createdAt: string;
+}
+
 export interface JobDetail {
   job: Job;
   messages: JobMessage[];
   clarifications: ClarificationItem[];
   taskDrafts: TaskDraft[];
+  dagNodes: DagNode[];
+  dagEdges: DagEdge[];
+  taskArtifacts: TaskArtifact[];
 }
 
 export interface SubmitClarificationAnswer {
@@ -310,6 +367,20 @@ export async function deleteJob(jobId: number): Promise<boolean> {
     method: "DELETE",
   });
   return handleResponse<boolean>(res);
+}
+
+export async function replanJob(jobId: number): Promise<JobDetail> {
+  const res = await fetch(`/api/jobs/${jobId}/replan`, {
+    method: "POST",
+  });
+  return handleResponse<JobDetail>(res);
+}
+
+export async function resumeJob(jobId: number): Promise<JobDetail> {
+  const res = await fetch(`/api/jobs/${jobId}/resume`, {
+    method: "POST",
+  });
+  return handleResponse<JobDetail>(res);
 }
 
 export async function appendJobMessage(
