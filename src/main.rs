@@ -225,6 +225,15 @@ async fn main() -> Result<()> {
         }
     };
 
+    // 恢复异常退出时卡住的节点和 Job 状态
+    match db::recover_stuck_jobs_and_nodes(&pool).await {
+        Ok((node_count, job_count)) if node_count > 0 => {
+            info!("恢复 {} 个卡住节点，{} 个关联 Job", node_count, job_count);
+        }
+        Ok(_) => {}
+        Err(e) => warn!("恢复卡住状态失败: {}", e),
+    }
+
     let pi_session_dir = db_dir.join("pi-sessions");
     let workspace_dir = db_dir.join("workspace");
     if let Err(e) = std::fs::create_dir_all(&workspace_dir) {

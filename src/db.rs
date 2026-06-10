@@ -1537,6 +1537,55 @@ pub async fn set_dag_node_worktree(
     Ok(())
 }
 
+/// 恢复异常退出时卡住的节点和 Job 状态
+/// 将 `running` 状态的节点重置为 `pending`，并将关联的 Job 重置为 `dag_ready`
+pub async fn recover_stuck_jobs_and_nodes(pool: &Pool<Sqlite>) -> Result<(usize, usize)> {
+    // 1. 查找所有 running 状态的节点
+    let stuck_nodes: Vec<(i64, i64)> =
+        sqlx::query_as("SELECT id, job_id FROM dag_nodes WHERE status = 'running'")
+            .fetch_all(pool)
+            .await?;
+
+    let node_count = stuck_nodes.len();
+    let mut job_ids = std::collections::HashSet::new();
+
+    for (node_id, job_id) in &stuck_nodes {
+        // 重置节点状态为 pending
+        sqlx::query(
+            "UPDATE dag_nodes
+             SET status = 'pending',
+                 result_summary = NULL,
+                 error_message = '程序异常退出，状态已恢复',
+                 started_at = NULL,
+                 finished_at = NULL,
+                 updated_at = datetime('now')
+             WHERE id = $1",
+        )
+        .bind(node_id)
+        .execute(pool)
+        .await?;
+
+        job_ids.insert(*job_id);
+    }
+
+    // 2. 重置关联的 Job 状态
+    let job_count = job_ids.len();
+    for job_id in job_ids {
+        sqlx::query(
+            "UPDATE jobs
+             SET status = 'dag_ready',
+                 current_stage = 'dag_ready',
+                 updated_at = datetime('now')
+             WHERE id = $1 AND status = 'executing'",
+        )
+        .bind(job_id)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok((node_count, job_count))
+}
+
 pub async fn insert_task_artifact(
     pool: &Pool<Sqlite>,
     job_id: i64,

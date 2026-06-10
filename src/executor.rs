@@ -348,7 +348,12 @@ fn build_worker_prompt(node: &DagNode) -> String {
 
 {}
 
-完成后请简短总结修改内容和验证方式。"#,
+## 重要规则
+
+1. **必须在工作目录中实际创建/修改文件**，不能只生成代码回复而不写入文件系统。
+2. 创建新文件后，确保文件确实存在于工作目录中（可用 `ls` 验证）。
+3. 如果目标是创建文件（如 HTML、CSS、JS），**文件必须写入磁盘**，不能只返回代码块。
+4. 完成后请简短总结修改内容和验证方式。"#,
         node.title,
         node.kind,
         node.instructions,
@@ -438,22 +443,50 @@ async fn git_diff(worktree_path: &Path) -> Result<String> {
 }
 
 async fn apply_diff(project_path: &Path, diff: &str) -> Result<()> {
-    let mut child = Command::new("git")
-        .arg("apply")
-        .arg("--3way")
-        .arg("-")
-        .current_dir(project_path)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("启动 git apply 失败")?;
+    async fn run_git_apply(
+        project_path: &Path,
+        diff: &str,
+        extra_args: &[&str],
+    ) -> Result<std::process::Output> {
+        let mut child = Command::new("git")
+            .args(["apply"])
+            .args(extra_args)
+            .arg("-")
+            .current_dir(project_path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("启动 git apply 失败")?;
 
-    let mut stdin = child.stdin.take().context("打开 git apply stdin 失败")?;
-    stdin.write_all(diff.as_bytes()).await?;
-    drop(stdin);
+        let mut stdin = child.stdin.take().context("打开 git apply stdin 失败")?;
+        stdin.write_all(diff.as_bytes()).await?;
+        drop(stdin);
 
-    let output = child.wait_with_output().await?;
+        child
+            .wait_with_output()
+            .await
+            .context("等待 git apply 失败")
+    }
+
+    // 先尝试 --3way（对已有文件的修改更友好）
+    match run_git_apply(project_path, diff, &["--3way"]).await {
+        Ok(output) if output.status.success() => return Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("does not exist in index")
+                || stderr.contains("cannot read the current contents")
+            {
+                tracing::info!("--3way 对新文件失败，回退到普通 git apply");
+            } else {
+                anyhow::bail!("合入节点 diff 失败: {}", stderr.trim());
+            }
+        }
+        Err(e) => return Err(e),
+    }
+
+    // 回退到普通 apply（支持新文件）
+    let output = run_git_apply(project_path, diff, &[]).await?;
     if !output.status.success() {
         anyhow::bail!(
             "合入节点 diff 失败: {}",
