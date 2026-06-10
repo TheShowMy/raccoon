@@ -71,29 +71,55 @@ pub async fn create_feature_branch(
 // ===== Diff 与提交 =====
 
 /// 将 diff 应用到当前分支
+/// 先尝试 --3way（处理修改的文件），失败后尝试普通 apply（处理新文件）
 pub async fn apply_diff_to_branch(project_path: &Path, _branch: &str, diff: &str) -> Result<()> {
-    // diff 通过 stdin 传入
-    let mut child = Command::new("git")
-        .args(["apply", "--3way", "-"])
-        .current_dir(project_path)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("启动 git apply 失败")?;
+    async fn run_git_apply(
+        project_path: &Path,
+        diff: &str,
+        extra_args: &[&str],
+    ) -> Result<std::process::Output> {
+        let mut child = Command::new("git")
+            .args(["apply"])
+            .args(extra_args)
+            .arg("-")
+            .current_dir(project_path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("启动 git apply 失败")?;
 
-    if let Some(stdin) = child.stdin.take() {
-        let mut stdin = stdin;
-        tokio::io::AsyncWriteExt::write_all(&mut stdin, diff.as_bytes())
+        if let Some(stdin) = child.stdin.take() {
+            let mut stdin = stdin;
+            tokio::io::AsyncWriteExt::write_all(&mut stdin, diff.as_bytes())
+                .await
+                .context("写入 diff 失败")?;
+        }
+
+        child
+            .wait_with_output()
             .await
-            .context("写入 diff 失败")?;
-        // stdin 在 drop 时自动关闭
+            .context("等待 git apply 失败")
     }
 
-    let output = child
-        .wait_with_output()
-        .await
-        .context("等待 git apply 失败")?;
+    // 先尝试 --3way（对已有文件的修改更友好）
+    match run_git_apply(project_path, diff, &["--3way"]).await {
+        Ok(output) if output.status.success() => return Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("does not exist in index")
+                || stderr.contains("cannot read the current contents")
+            {
+                tracing::info!("--3way 对新文件失败，回退到普通 git apply");
+            } else {
+                anyhow::bail!("git apply --3way 失败: {}", stderr.trim());
+            }
+        }
+        Err(e) => return Err(e),
+    }
+
+    // 回退到普通 apply（支持新文件）
+    let output = run_git_apply(project_path, diff, &[]).await?;
     if !output.status.success() {
         anyhow::bail!(
             "git apply 失败: {}",

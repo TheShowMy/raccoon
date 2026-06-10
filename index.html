@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hello World · 主流编程语言代码展示</title>
+
+  <!-- Prism.js 暗色主题 CSS -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" />
+  <!-- 行号插件 CSS -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.css" />
+
+  <!-- 本地样式 -->
+  <link rel="stylesheet" href="styles.css" />
+
+  <style>
+    /* 页面附加样式 */
+    .page-header {
+      text-align: center;
+      padding: 48px 20px 24px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .page-header h1 {
+      margin: 0 0 8px;
+      font-size: 2rem;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    .page-header p {
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 1rem;
+    }
+
+    .languages-container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 20px 48px;
+    }
+
+    .card__lang-name {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .card__lang-icon {
+      width: 22px;
+      height: 22px;
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .card__lang-icon svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    .card pre {
+      margin: 0;
+      border-radius: var(--radius-code);
+    }
+
+    .card pre[class*="language-"] {
+      margin: 0;
+      background: var(--bg-code);
+    }
+
+    .footer-bar {
+      text-align: center;
+      padding: 24px 20px;
+      color: var(--text-muted);
+      font-size: 0.8125rem;
+      border-top: 1px solid var(--border-card);
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .footer-bar a {
+      color: var(--text-secondary);
+    }
+
+    .language-badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 500;
+      background-color: var(--bg-code);
+      color: var(--text-secondary);
+      border: 1px solid var(--border-card);
+    }
+
+    .card__count {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+
+  <header class="page-header">
+    <h1>🌍 Hello World</h1>
+    <p>多语言编程入门示例 · 共 13 种语言</p>
+  </header>
+
+  <main class="languages-container">
+    <ul class="card-list">
+
+      <!-- Python -->
+      <li class="card">
+        <div class="card__header">
+          <span class="card__lang-name">
+            <span class="card__lang-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="#3776AB" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2c-2.5 0-4.5.8-5.5 2-.5.6-.5 1.5 0 2 .8.8 2.5 1.3 5.5 1.3 3.8 0 5 .8 5.5 1.3.5.5.5 1.4 0 2-.8.8-2.5 1.4-5.5 1.4-4 0-6.5.5-7.5 1.5-.5.5-.5 1.5 0 2C5 16.2 7 17 12 17c3.5 0 5.5-.5 6.5-1.5.5-.5.5-1.5 0-2-.8-.8-2.5-1.5-6.5-1.5-3.5 0-5.5-.5-6.5-1.5"/></svg>
+            </span>
+            Python
+          </span>
+          <span class="language-badge">3.x</span>
+        </div>
+        <div class="card__body">
+          <pre class="line-numbers"><code class="language-python">print("Hello, World!")</code></pre>
+        </div>
+      </li>
+
+      <!-- JavaScript -->
+      <li class="card">
+        <div class="card__header">
+          <span class="card__lang-name">
+            <span class="card__lang-icon">
+              <svg viewBox="0 0 24 24" fill="#F7DF1E"><rect x="2" y="2" width="20" height="20" rx="2"/><path d="M14.5 16.5c.5.7 1.2 1.2 2.3 1.2 1 0 1.7-.5 1.7-1.2 0-.8-.7-1.1-1.8-1.6-.7-.3-1.6-.7-2.3-1.2-1.5-1-1.5-2.8 0-3.8 1-.7 2.5-1 3.8-.5 1 .3 1.7.8 2.2 1.6l-1.5 1c-.3-.5-.8-.9-1.5-.9-.7 0-1.2.4-1.2.9 0 .6.7.9 1.8 1.3 1.5.5 2.3 1 2.8 1.6 1 1.2 1 3-.2 4.1-1.2 1-3 1.3-4.5.7-1.2-.5-2-1.3-2.5-2.2l1.6-1zM8.5 16.2c.4.6.8 1.2 1.7 1.2.9 0 1.4-.4 1.4-1.5v-8h2v8c0 2.3-1.3 3.6-3.4 3.6-1.8 0-2.8-1-3.3-2.1l1.6-1.2z"/></svg>
+            </span>
+            JavaScript
+          </span>
+          <span class="language-badge">ES6+</span>
+        </div>
+        <div class="card__body">
+          <pre class="line-numbers"><code class="language-javascript">console.log("Hello, World!");</code></pre>
+        </div>
+      </li>
+
+      <!-- TypeScript -->
+      <li class="card">
+        <div class="card__header">
+          <span class="card__lang-name">
+            <span class="card__lang-icon">
+              <svg viewBox="0 0 24 24" fill="none"><rect x="2" y="2" width="20" height="20" rx="2" fill="#3178C6"/><path d="M5 12h3v7h2v-7h3V9H5v3zm12 5c-.7 0-1.4-.4-1.8-.9l-1.3.8c.6 1 1.7 1.7 3.1 1.7 1.8 0 3-1 3-2.4 0-1.4-.9-2.2-2.4-2.9l-.4-.2c-.8-.4-1.3-.7-1.3-1.2 0-.5.5-.9 1.2-.9.6 0 1.1.3 1.4.7l1.3-.8c-.6-1-1.5-1.5-2.7-1.5-1.7 0-2.8 1-2.8 2.4 0 1.4.9 2.1 2.2 2.8l.4.2c.8.4 1.4.7 1.4 1.2s-.5.9-1.3.9z" fill="white"/></svg>
+            </span>
+            TypeScript
+          </span>
+          <span class="language-badge">5.x</span>
+        </div>
+        <div class="card__body">
+          <pre class="line-numbers"><code class="language-typescript">const greeting: string = "Hello, World!";
+console.log(greeting);</code></pre>
+        </div>
+      </li>
+
+      <!-- Java -->
+      <li class="card">
+        <div class="card__header">
+          <span class="card__lang-name">
+            <span class="card__lang-icon">
+              <svg viewBox="0 0 24 24" fill="#007396"><path d="M14.6 17.4c3.5-.9 6.4-.2 6.4 1 0 1.3-3.5 2.6-7.7 2.6-3.5 0-6.2-1-6.2-2.2 0-1.2 2.4-2.2 5.6-2.5l1.9 1.1zM8.3 14.8c0 .5-2.1 1-4.7 1-2.6 0-4.7-.5-4.7-1 0-.6 2.1-1 4.7-1 2.6 0 4.7.4 4.7 1z"/><path d="M10 12c0 2.2-2.2 4-5 4-2.8 0-5-1.8-5-4s2.2-4 5-4c2.8 0 5 1.8 5 4z"/><path d="M18 7c-.8 0-1.5.7-1.5 1.5S17.2 10 18 10s1.5-.7 1.5-1.5S18.8 7 18 7z"/></svg>
+            </span>
+            Java
+          </span>
+          <span class="language-badge">21 LTS</span>
+        </div>
+        <div class="card__body">
+          <pre class="line-numbers"><code class="language-java">public class HelloWorld {
+    public static void main(String[] args) {
+        System.out.println("Hello, World!");
+    }
+}</code></pre>
+        </div>
+      </li>
+
+      <!-- C -->
+      <li class="card">
+        <div class="card__header">
+          <span class="card__lang-name">
+            <span class="card__lang-icon">
+              <svg viewBox="0 0 24 24" fill="#A8B9CC"><circle cx="12" cy="12" r="10" stroke="#A8B9CC" stroke-width="2" fill="none"/><path d="M8 10v4a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-1" stroke="#A8B9CC" stroke-width="2" fill="none"/><path d="M12 7v10" stroke="#555" stroke-width="0"/></svg>
+            </span>
+            C
+          </span>
+          <span class="language-badge">C11</span>
+        </div>
+        <div class="card__body">
+          <pre class="line-numbers"><code class="language-c">#include &lt;stdio.h&gt;
+
+int main() {
+    printf("Hello, World!\n");
+    return 0;
+}</code></pre>
+        </div>
+      </li>
+
+      <!-- C++ -->
+      <li class="card">
+        <div class="card__header">
+          <span class="card__lang-name">
+            <span class="card__lang-icon">
+              <svg viewBox="0 0 24 24" fill="#00599C"><path d="M12 2L2 7v10l10 5 10-5V7l-10-5z" opacity=".3"/><path d="M12 2L2 7v10l10 5 10-5V7l-10-5z" opacity=".6"/><path d="M8 10v4a4 4 0 0 0 4 4h0a4 4 0 0 0 4-4v-1" stroke="#00599C" stroke-width="2" fill="none"/><path d="M12 7v10" stroke="#00599C" stroke-width="0"/></svg>
+            </span>
+            C++
+          </span>
+          <span class="language-badge">C++20</span>
+        </div>
+        <div class="card__body">
+          <pre class="line-numbers"><code class="language-cpp">#include &lt;iostream&gt;
+
+int main() {
+    std::cout &lt;&lt; "Hello, World!" &lt;&lt; std::endl;
+    return 0;
+}</code></pre>
+        </div>
+      </li>
+
+      <!-- Rust -->
+      <li class="card">
+        <div class="card__header">
+          <span class="card__lang-name">
+            <span class="card__lang-icon">
+              <svg viewBox="0 0 24 24" fill="#DEA584"><path d="M12 2C6 2 2 6 2 12s4 10 10 10 10-4 10-10S18 2 12 2zm0 3c1.1 0 2 .9 2 2 0 .5-.2 1-.5 1.4l2 2c.3-.4.5-.9.5-1.4 0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2c-.5 0-1-.2-1.4-.5l-2 2c.3.4.5.9.5 1.4 0 .3-.1.6-.2.9l3.7 1.2c.5-.3 1-.5 1.6-.5 1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2c0-.5.2-1 .5-1.4l-3.7-1.2c-.3.3-.6.5-1 .6L12 18c-1.1 0-2-.9-2-2 0-.5.2-1 .5-1.4l-2-2C8.2 12.7 7.7 13 7.2 13c-1.1 0-2-.9-2-2s.9-2 2-2c.5 0 1 .2 1.4.5l2-2C10.2 7.2 10 6.7 10 6c0-1.1.9-2 2-2z"/></svg>
+            </span>
+            Rust
+          </span>
+          <span class="language-badge">2024 ed.</span>
+        </div>
+        <div class="card__body">
+          <pre class="line-numbers"><code class="language-rust">fn main() {
+    println!("Hello, World!");
+}</code></pre>
+        </div>
+      </li>
+
+      <!-- Go -->
+      <li class="card">
+        <div class="card__header">
+          <span class="card__lang-name">
+            <span class="card__lang-icon">
+              <svg viewBox="0 0 24 24" fill="#00ADD8"><path d="M3 7.5c-.3 0-.5-.2-.5-.5s.2-.5.5-.5h2c.3 0 .5.2.5.5S5.3 7.5 5 7.5H3zm12 0c-.3 0-.5-.2-.5-.5s.2-.5.5-.5h2c.3 0 .5.2.5.5s-.2.5-.5.5h-2zM3 10.5c-.3 0-.5-.2-.5-.5s.2-.5.5-.5h3c.3 0 .5.2.5.5s-.2.5-.5.5H3zm8 0c-.3 0-.5-.2-.5-.5s.2-.5.5-.5h3c.3 0 .5.2.5.5s-.2.5-.5.5h-3zM6 13.5c-.3 0-.5-.2-.5-.5s.2-.5.5-.5h2c.3 0 .5.2.5.5s-.2.5-.5.5H6zm8 0c-.3 0-.5-.2-.5-.5s.2-.5.5-.5h2c.3 0 .5.2.5.5s-.2.5-.5.5h-2z"/></svg>
+            </span>
+            Go
+          </span>
+          <span class="language-badge">1.22</span>
+        </div>
+        <div class="card__body">
+          <pre class="line-numbers"><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+    fmt.Println("Hello, World!")
+}</code></pre>
+        </div>
+      </li>
+
+      <!-- Ruby -->
+      <li class="card">
+        <div class="card__header">
+          <span class="card__lang-name">
+            <span class="card__lang-icon">
+              <svg viewBox="0 0 24 24" fill="#CC342D"><path d="M12 2L3 7v10l9 5 9-5V7l-9-5z"/><path d="M12 2L3 7v10l9 5V2z" opacity=".5"/></svg>
+            </span>
+            Ruby
+          </span>
+          <span class="language-badge">3.3</span>
+        </div>
+        <div class="card__body">
+          <pre class="line-numbers"><code class="language-ruby">puts "Hello, World!"</code></pre>
+        </div>
+      </li>
+
+      <!-- PHP -->
+      <li class="card">
+        <div class="card__header">
+          <span class="card__lang-name">
+            <span class="card__lang-icon">
+              <svg viewBox="0 0 24 24" fill="none"><ellipse cx="12" cy="12" rx="10" ry="8" fill="#777BB4"/><path d="M7 9h2l.5 3H8l-.5 3H5.5L7 9z" fill="white"/><path d="M12 9h2l-1 3h-1l-.5 3h-2l1-3h1l.5-3z" fill="white"/><path d="M16 9h2.5L17 15h-2l.5-3h-1.5l.5-3z" fill="white"/></svg>
+            </span>
+            PHP
+          </span>
+          <span class="language-badge">8.3</span>
+        </div>
+        <div class="card__body">
+          <pre class="line-numbers"><code class="language-php">&lt;?php
+
+echo "Hello, World!\n";</code></pre>
+        </div>
+      </li>
+
+      <!-- Swift -->
+      <li class="card">
+        <div class="card__header">
+          <span class="card__lang-name">
+            <span class="card__lang-icon">
+              <svg viewBox="0 0 24 24" fill="#F05138"><path d="M18 2c-4 0-8 3-10 7-1 2-1.5 4-1 5.5C5 12 6 9 8 7c3-3 7-5 10-5z"/><path d="M17 15c-3 0-6-1-8-3-2-2-3-4-3-6 0-2 1-4 3-5-4 2-7 6-7 11 0 2 .5 4 1.5 5.5L2 22l5-2c2 1 4.5 1.5 7 .5 3-1 5-3.5 6-6-1 1-2.5 1.5-4 1.5-1 0-2-.3-3-.8 1.5-1 2.5-2.5 2.5-4.2"/></svg>
+            </span>
+            Swift
+          </span>
+          <span class="language-badge">5.10</span>
+        </div>
+        <div class="card__body">
+          <pre class="line-numbers"><code class="language-swift">print("Hello, World!")</code></pre>
+        </div>
+      </li>
+
+      <!-- Kotlin -->
+      <li class="card">
+        <div class="card__header">
+          <span class="card__lang-name">
+            <span class="card__lang-icon">
+              <svg viewBox="0 0 24 24" fill="#7F52FF"><path d="M3 2h7.7L12 4 8 8l4.7 4.7L18 18l-6 4H3V2z"/><path d="M19.5 2H24v20h-7l-7-7 7-7V2z" opacity=".5"/></svg>
+            </span>
+            Kotlin
+          </span>
+          <span class="language-badge">2.0</span>
+        </div>
+        <div class="card__body">
+          <pre class="line-numbers"><code class="language-kotlin">fun main() {
+    println("Hello, World!")
+}</code></pre>
+        </div>
+      </li>
+
+      <!-- Scala -->
+      <li class="card">
+        <div class="card__header">
+          <span class="card__lang-name">
+            <span class="card__lang-icon">
+              <svg viewBox="0 0 24 24" fill="#DC322F"><path d="M5 2h14l-6 10 6 10H5l6-10L5 2z"/></svg>
+            </span>
+            Scala
+          </span>
+          <span class="language-badge">3.5</span>
+        </div>
+        <div class="card__body">
+          <pre class="line-numbers"><code class="language-scala">@main def hello(): Unit =
+  println("Hello, World!")</code></pre>
+        </div>
+      </li>
+
+    </ul>
+  </main>
+
+  <footer class="footer-bar">
+    Powered by <a href="https://prismjs.com" target="_blank" rel="noopener">Prism.js</a>
+    · 暗色主题 · Raccoon
+  </footer>
+
+  <!-- Prism.js 核心 JS -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+  <!-- 行号插件 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.js"></script>
+  <!-- 各语言组件（自动加载所有常用语言） -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-typescript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-java.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-ruby.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-php.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-swift.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-kotlin.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-scala.min.js"></script>
+</body>
+</html>

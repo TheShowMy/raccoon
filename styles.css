@@ -1,0 +1,465 @@
+/* ===== Raccoon Dark Theme + Card Styles ===== */
+
+/* ---------- 全局暗色主题 ---------- */
+:root {
+  --bg-page: #0d1117;
+  --bg-card: #161b22;
+  --bg-card-hover: #1c2128;
+  --bg-code: #1c2333;
+  --bg-code-inline: rgba(255, 255, 255, 0.06);
+  --text-primary: #e6edf3;
+  --text-secondary: #8b949e;
+  --text-muted: #6e7681;
+  --border-card: #30363d;
+  --border-card-hover: #484f58;
+  --shadow-card: 0 4px 12px rgba(0, 0, 0, 0.3);
+  --shadow-card-hover: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --radius-card: 12px;
+  --radius-code: 8px;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas',
+    'Monaco', 'SF Mono', 'Menlo', monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --transition-default: 200ms ease;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  background-color: var(--bg-page);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: #58a6ff;
+  text-decoration: none;
+  transition: color var(--transition-default);
+}
+
+a:hover {
+  color: #79c0ff;
+  text-decoration: underline;
+}
+
+/* ---------- 卡片列表（响应式网格） ---------- */
+.card-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+/* 紧凑模式 */
+.card-list--compact {
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+/* 宽栏模式（1~2 列） */
+.card-list--wide {
+  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+}
+
+/* 单列 */
+.card-list--single {
+  grid-template-columns: 1fr;
+  max-width: 800px;
+}
+
+/* 水平 Flex 布局替代 */
+.card-list--horizontal {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.card-list--horizontal > .card {
+  flex: 1 1 300px;
+  max-width: 100%;
+}
+
+/* ---------- 卡片 ---------- */
+.card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  padding: 20px;
+  transition:
+    background-color var(--transition-default),
+    border-color var(--transition-default),
+    box-shadow var(--transition-default),
+    transform var(--transition-default);
+  display: flex;
+  flex-direction: column;
+}
+
+.card:hover {
+  background-color: var(--bg-card-hover);
+  border-color: var(--border-card-hover);
+  box-shadow: var(--shadow-card-hover);
+}
+
+/* 可点击卡片 */
+.card--clickable {
+  cursor: pointer;
+}
+
+.card--clickable:hover {
+  transform: translateY(-2px);
+}
+
+/* 卡片头部 */
+.card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  gap: 8px;
+}
+
+.card__title {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.card__subtitle {
+  margin: 0 0 8px;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.card__body {
+  flex: 1;
+  font-size: 0.9375rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.card__footer {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-card);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+
+/* 卡片内无内边距的变体（用于嵌套图像 / 代码等） */
+.card--flush {
+  padding: 0;
+  overflow: hidden;
+}
+
+.card--flush .card__header,
+.card--flush .card__body,
+.card--flush .card__footer {
+  padding-left: 20px;
+  padding-right: 20px;
+}
+
+.card--flush .card__header {
+  padding-top: 20px;
+}
+
+.card--flush .card__footer {
+  padding-bottom: 20px;
+}
+
+/* ---------- 状态类卡片 ---------- */
+.card--success {
+  border-left: 4px solid #3fb950;
+}
+
+.card--warning {
+  border-left: 4px solid #d29922;
+}
+
+.card--error {
+  border-left: 4px solid #f85149;
+}
+
+.card--info {
+  border-left: 4px solid #58a6ff;
+}
+
+/* ---------- 代码块 ---------- */
+code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  background-color: var(--bg-code-inline);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+pre {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  background-color: var(--bg-code);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-code);
+  padding: 16px;
+  overflow-x: auto;
+  white-space: pre;
+  word-spacing: normal;
+  word-break: normal;
+  word-wrap: normal;
+  tab-size: 2;
+  -moz-tab-size: 2;
+  -webkit-overflow-scrolling: touch;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+  color: inherit;
+  border-radius: 0;
+}
+
+/* 代码块内的行号 */
+pre .line-numbers-rows {
+  border-right: 1px solid var(--border-card);
+}
+
+code[class*='language-'],
+pre[class*='language-'] {
+  font-family: var(--font-mono);
+  text-shadow: none;
+  direction: ltr;
+  text-align: left;
+  white-space: pre;
+  word-spacing: normal;
+  word-break: normal;
+  word-wrap: normal;
+  line-height: 1.5;
+  tab-size: 4;
+  -moz-tab-size: 4;
+  -webkit-hyphens: none;
+  -moz-hyphens: none;
+  -ms-hyphens: none;
+  hyphens: none;
+}
+
+/* ---------- Prism.js 暗色适配 ---------- */
+/* 覆盖 Prism 默认亮色主题，适配暗色背景 */
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+  color: #8b949e;
+  font-style: italic;
+}
+
+.token.punctuation {
+  color: #c9d1d9;
+}
+
+.token.property,
+.token.tag,
+.token.boolean,
+.token.number,
+.token.constant,
+.token.symbol,
+.token.deleted {
+  color: #79c0ff;
+}
+
+.token.selector,
+.token.attr-name,
+.token.string,
+.token.char,
+.token.builtin,
+.token.inserted {
+  color: #a5d6ff;
+}
+
+.token.operator,
+.token.entity,
+.token.url,
+.language-css .token.string,
+.style .token.string {
+  color: #d2a8ff;
+}
+
+.token.atrule,
+.token.attr-value,
+.token.keyword {
+  color: #ff7b72;
+}
+
+.token.function,
+.token.class-name {
+  color: #d2a8ff;
+}
+
+.token.regex,
+.token.important,
+.token.variable {
+  color: #ffa657;
+}
+
+.token.important,
+.token.bold {
+  font-weight: bold;
+}
+
+.token.italic {
+  font-style: italic;
+}
+
+.token.entity {
+  cursor: help;
+}
+
+/* Prism 行号插件适配 */
+pre.line-numbers {
+  position: relative;
+  padding-left: 3.8em;
+  counter-reset: linenumber;
+}
+
+pre.line-numbers > code {
+  position: relative;
+  white-space: inherit;
+}
+
+.line-numbers .line-numbers-rows {
+  position: absolute;
+  pointer-events: none;
+  top: 0;
+  left: 0;
+  width: 3em;
+  letter-spacing: -1px;
+  border-right: 1px solid var(--border-card);
+  user-select: none;
+}
+
+.line-numbers-rows > span {
+  display: block;
+  counter-increment: linenumber;
+}
+
+.line-numbers-rows > span::before {
+  content: counter(linenumber);
+  color: var(--text-muted);
+  display: block;
+  padding-right: 0.8em;
+  text-align: right;
+}
+
+/* Prism 高亮插件适配 */
+pre[class*='language-'] mark,
+pre[class*='language-'] .highlight-line {
+  display: block;
+  background-color: rgba(88, 166, 255, 0.08);
+  border-left: 3px solid #58a6ff;
+  padding-left: 12px;
+  margin-left: -16px;
+  padding-right: 16px;
+  margin-right: -16px;
+}
+
+/* ---------- 工具类 ---------- */
+.text-mono {
+  font-family: var(--font-mono);
+}
+
+.text-secondary {
+  color: var(--text-secondary);
+}
+
+.text-muted {
+  color: var(--text-muted);
+}
+
+.bg-dark {
+  background-color: var(--bg-page);
+}
+
+.rounded-card {
+  border-radius: var(--radius-card);
+}
+
+.shadow-card {
+  box-shadow: var(--shadow-card);
+}
+
+/* ---------- 滚动条暗色适配 ---------- */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #30363d;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #484f58;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #30363d transparent;
+}
+
+/* ---------- 选择文字颜色 ---------- */
+::selection {
+  background-color: rgba(88, 166, 255, 0.3);
+  color: #e6edf3;
+}
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 768px) {
+  .card-list {
+    grid-template-columns: 1fr;
+  }
+
+  .card {
+    padding: 16px;
+  }
+
+  pre {
+    padding: 12px;
+    font-size: 0.8125rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
