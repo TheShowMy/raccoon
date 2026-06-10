@@ -449,7 +449,52 @@ async fn git_diff(worktree_path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// 解析 diff 中标记为 "new file" 的文件路径列表
+fn parse_new_files_from_diff(diff: &str) -> Vec<String> {
+    let mut files = Vec::new();
+    let lines: Vec<&str> = diff.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].starts_with("diff --git a/") {
+            let file_line = lines[i];
+            let mut is_new_file = false;
+            let mut j = i + 1;
+            while j < lines.len() && j < i + 6 && !lines[j].starts_with("diff --git a/") {
+                if lines[j].starts_with("new file mode") {
+                    is_new_file = true;
+                    break;
+                }
+                j += 1;
+            }
+            if is_new_file {
+                if let Some(rest) = file_line.strip_prefix("diff --git a/") {
+                    if let Some(end) = rest.find(" b/") {
+                        files.push(rest[..end].to_string());
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    files
+}
+
 async fn apply_diff(project_path: &Path, diff: &str) -> Result<()> {
+    // 预先清理 diff 中已存在的"新文件"，避免 git apply 报 already exists
+    let new_files = parse_new_files_from_diff(diff);
+    for file in &new_files {
+        let path = project_path.join(file);
+        if path.exists() {
+            if path.is_file() {
+                tracing::info!("删除已存在的新文件: {}", path.display());
+                let _ = tokio::fs::remove_file(&path).await;
+            } else if path.is_dir() {
+                tracing::info!("删除已存在的新目录: {}", path.display());
+                let _ = tokio::fs::remove_dir_all(&path).await;
+            }
+        }
+    }
+
     async fn run_git_apply(
         project_path: &Path,
         diff: &str,

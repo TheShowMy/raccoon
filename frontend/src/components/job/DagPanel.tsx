@@ -266,16 +266,17 @@ export function DagPanel({
           <h3 className="text-sm font-semibold text-slate-900">任务 DAG</h3>
         </div>
         <div className="flex items-center gap-2">
-          {jobStatus === "blocked" && onResume && (
-            <button
-              onClick={onResume}
-              disabled={resuming}
-              className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {resuming && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-              继续执行
-            </button>
-          )}
+          {(jobStatus === "blocked" || jobStatus === "dag_ready") &&
+            onResume && (
+              <button
+                onClick={onResume}
+                disabled={resuming}
+                className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {resuming && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                {jobStatus === "dag_ready" ? "开始执行" : "继续执行"}
+              </button>
+            )}
           {nodes.length > 0 && (
             <button
               onClick={() => setDetailOpen((v) => !v)}
