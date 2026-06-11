@@ -353,11 +353,9 @@ fn build_worker_prompt(node: &DagNode) -> String {
 1. **必须在工作目录中实际创建/修改文件**，不能只生成代码回复而不写入文件系统。
 2. 创建新文件后，确保文件确实存在于工作目录中（可用 `ls` 验证）。
 3. 如果目标是创建文件（如 HTML、CSS、JS），**文件必须写入磁盘**，不能只返回代码块。
-4. **禁止运行包管理器**：不要执行 `npm install`、`yarn`、`pnpm install` 等命令。
-5. **禁止修改 lock 文件**：不要修改 `package-lock.json`、`yarn.lock`、`pnpm-lock.yaml`。
-6. **禁止创建 `node_modules`**：不要创建或修改 `node_modules` 目录及其内容。
-7. **只操作目标文件**：只修改与当前节点直接相关的文件，不要改动无关文件（如配置文件、日志、缓存等）。
-8. 完成后请简短总结修改内容和验证方式。"#,
+4. **只操作目标文件**：只修改与当前节点直接相关的文件，不要改动无关文件（如配置文件、日志、缓存等）。
+5. **管理 .gitignore**：开始工作前，检查 `.gitignore` 是否完整。根据项目技术栈（如 Node.js 的 `node_modules/`、Python 的 `__pycache__/`、Rust 的 `target/` 等），确保不需要跟踪的依赖目录、lock 文件、构建产物都被正确忽略。如果 `.gitignore` 缺失或不完整，请补充完善。
+6. 完成后请简短总结修改内容和验证方式。"#,
         node.title,
         node.kind,
         node.instructions,
