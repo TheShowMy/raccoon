@@ -131,12 +131,26 @@ pub async fn apply_diff_to_branch(project_path: &Path, _branch: &str, diff: &str
 
 /// 提交所有变更
 pub async fn commit_changes(project_path: &Path, _branch: &str, message: &str) -> Result<()> {
-    // 配置 git user（如果未配置）
-    let _ = Command::new("git")
+    // 配置 git user（如果未配置则设置默认值）
+    let email_check = Command::new("git")
         .args(["config", "user.email"])
         .current_dir(project_path)
         .output()
         .await;
+    if !email_check.map(|o| o.status.success()).unwrap_or(false) {
+        Command::new("git")
+            .args(["config", "user.email", "raccoon@auto.dev"])
+            .current_dir(project_path)
+            .output()
+            .await
+            .context("设置 git user.email 失败")?;
+        Command::new("git")
+            .args(["config", "user.name", "raccoon"])
+            .current_dir(project_path)
+            .output()
+            .await
+            .context("设置 git user.name 失败")?;
+    }
 
     // 添加所有变更
     let add = Command::new("git")
