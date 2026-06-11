@@ -1128,8 +1128,8 @@ async fn resume_job_handler(
         }
     };
 
-    if job.status != "blocked" {
-        return Json(ApiResponse::err("只有阻塞状态的任务才能恢复执行"));
+    if job.status != "blocked" && job.status != "dag_ready" {
+        return Json(ApiResponse::err("只有待执行或阻塞状态的任务才能恢复执行"));
     }
 
     match db::resume_job_for_execution(&state.pool, job_id).await {

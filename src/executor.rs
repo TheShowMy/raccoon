@@ -436,6 +436,13 @@ async fn git_diff(worktree_path: &Path) -> Result<String> {
         .arg("diff")
         .arg("--cached")
         .arg("--binary")
+        .arg("--")
+        .arg(".")
+        .arg(":!node_modules")
+        .arg(":!package-lock.json")
+        .arg(":!yarn.lock")
+        .arg(":!pnpm-lock.yaml")
+        .arg(":!*.lock")
         .current_dir(worktree_path)
         .output()
         .await
@@ -500,10 +507,11 @@ async fn apply_diff(project_path: &Path, diff: &str) -> Result<()> {
         diff: &str,
         extra_args: &[&str],
     ) -> Result<std::process::Output> {
+        let mut all_args = vec!["apply", "--whitespace=nowarn"];
+        all_args.extend(extra_args);
+        all_args.push("-");
         let mut child = Command::new("git")
-            .args(["apply"])
-            .args(extra_args)
-            .arg("-")
+            .args(&all_args)
             .current_dir(project_path)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
