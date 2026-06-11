@@ -246,13 +246,17 @@ async fn execute_node(
         node,
         &worker,
         &worktree_path,
+        project_path,
         pi_session_dir,
         extension_path,
     )
     .await?;
-    let diff = git_diff(&worktree_path).await?;
-    if diff.trim().is_empty() {
-        return Ok(format!("节点执行完成但没有产生代码 diff：{}", node.title));
+
+    // LLM 自治合并：直接比较 worktree 和 project_path，复制变更文件
+    let sync_summary = sync_worktree_to_project(&worktree_path, project_path).await?;
+
+    if sync_summary.is_empty() {
+        return Ok(format!("节点执行完成但没有产生代码变更：{}", node.title));
     }
 
     db::insert_task_artifact(
@@ -260,20 +264,88 @@ async fn execute_node(
         job_id,
         TaskArtifactSeed {
             node_id: node.id,
-            artifact_type: "diff".to_string(),
-            path: Some(format!("node-{}.diff", node.id)),
-            content: diff.clone(),
+            artifact_type: "sync_summary".to_string(),
+            path: Some(format!("node-{}-summary.md", node.id)),
+            content: sync_summary.clone(),
         },
     )
     .await?;
-    if pr_enabled {
-        // PR 模式：将 diff apply 到当前 feature 分支
-        git_pr::apply_diff_to_branch(project_path, "", &diff).await?;
-    } else {
-        apply_diff(project_path, &diff).await?;
+
+    Ok(format!("节点执行完成：{}", sync_summary))
+}
+
+/// 比较 worktree 和 project_path，直接复制变更文件到 project_path
+/// 返回变更摘要文本
+async fn sync_worktree_to_project(worktree_path: &Path, project_path: &Path) -> Result<String> {
+    // 在 worktree 中执行 git add -A，获取变更列表
+    let _ = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(worktree_path)
+        .output()
+        .await;
+
+    let output = Command::new("git")
+        .args(["diff", "--cached", "--name-status"])
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .context("获取 worktree 变更列表失败")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git diff --name-status 失败: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
 
-    Ok(format!("节点执行完成并已合入 diff：{}", node.title))
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut summaries = Vec::new();
+
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.splitn(2, '\t').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let status = parts[0];
+        let file_path = parts[1];
+
+        match status {
+            "A" => {
+                let src = worktree_path.join(file_path);
+                let dst = project_path.join(file_path);
+                if src.is_dir() {
+                    copy_dir_recursive(&src, &dst).await.ok();
+                    summaries.push(format!("[新增目录] {}", file_path));
+                } else if src.is_file() {
+                    if let Some(parent) = dst.parent() {
+                        tokio::fs::create_dir_all(parent).await.ok();
+                    }
+                    tokio::fs::copy(&src, &dst).await.ok();
+                    summaries.push(format!("[新增] {}", file_path));
+                }
+            }
+            "M" => {
+                let src = worktree_path.join(file_path);
+                let dst = project_path.join(file_path);
+                if src.is_file() {
+                    if let Some(parent) = dst.parent() {
+                        tokio::fs::create_dir_all(parent).await.ok();
+                    }
+                    tokio::fs::copy(&src, &dst).await.ok();
+                    summaries.push(format!("[修改] {}", file_path));
+                }
+            }
+            "D" => {
+                let dst = project_path.join(file_path);
+                if dst.exists() {
+                    let _ = tokio::fs::remove_file(&dst).await;
+                    summaries.push(format!("[删除] {}", file_path));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(summaries.join("\n"))
 }
 
 async fn select_worker_model(
@@ -293,6 +365,7 @@ async fn run_worker(
     node: &DagNode,
     worker: &db::WorkerModelTier,
     worktree_path: &Path,
+    project_path: &Path,
     pi_session_dir: &Path,
     extension_path: Option<&Path>,
 ) -> Result<()> {
@@ -315,7 +388,9 @@ async fn run_worker(
         .await
         .unwrap_or_else(|_| "medium".to_string());
     client.set_thinking_level(&thinking).await?;
-    client.prompt(&build_worker_prompt(node)).await?;
+    client
+        .prompt(&build_worker_prompt(node, worktree_path, project_path))
+        .await?;
     client
         .wait_for_agent_end_with_events(WORKER_TIMEOUT, &mut |_| {})
         .await
@@ -324,47 +399,58 @@ async fn run_worker(
     Ok(())
 }
 
-fn build_worker_prompt(node: &DagNode) -> String {
+fn build_worker_prompt(node: &DagNode, worktree_path: &Path, project_path: &Path) -> String {
     format!(
-        r#"你是 raccoon 的 DAG Worker，当前工作目录是该节点独立 Git worktree。
+        r#"你是 raccoon 的 DAG Worker。
 
-请只完成当前节点，不要处理未声明的其他任务。
-所有说明和总结使用简体中文。
+## 目录结构
+
+- **Worktree（你在这里修改代码）**：{worktree}
+- **主项目（最终同步到这里）**：{project}
 
 ## 节点
 
-标题：{}
-类型：{}
+标题：{title}
+类型：{kind}
 
 ## 执行说明
 
-{}
+{instructions}
 
 ## 验收标准
 
-{}
+{criteria}
 
 ## 目标文件
 
-{}
+{targets}
 
 ## 重要规则
 
-1. **必须在工作目录中实际创建/修改文件**，不能只生成代码回复而不写入文件系统。
-2. 创建新文件后，确保文件确实存在于工作目录中（可用 `ls` 验证）。
-3. 如果目标是创建文件（如 HTML、CSS、JS），**文件必须写入磁盘**，不能只返回代码块。
-4. **只操作目标文件**：只修改与当前节点直接相关的文件，不要改动无关文件（如配置文件、日志、缓存等）。
-5. **管理 .gitignore**：开始工作前，检查 `.gitignore` 是否完整。根据项目技术栈（如 Node.js 的 `node_modules/`、Python 的 `__pycache__/`、Rust 的 `target/` 等），确保不需要跟踪的依赖目录、lock 文件、构建产物都被正确忽略。如果 `.gitignore` 缺失或不完整，请补充完善。
-6. 完成后请简短总结修改内容和验证方式。"#,
-        node.title,
-        node.kind,
-        node.instructions,
-        node.acceptance_criteria
+1. **只完成当前节点**，不要处理未声明的其他任务。
+2. **必须实际写入文件**，不能只返回代码块。创建后用 `ls` 验证文件存在。
+3. **只操作目标文件**，不要改动无关文件（配置、日志、缓存等）。
+4. **管理 .gitignore**：开始工作前检查 `.gitignore`。确保 `node_modules/`、`__pycache__/`、`target/`、lock 文件、构建产物等被正确忽略。不完整的请补充。
+5. **同步变更到主项目**：完成修改后，执行以下步骤：
+   a. `git add -A`
+   b. `git status --short` 查看变更列表
+   c. 确认没有意外文件（如 node_modules、lock 文件）被纳入变更
+   d. 在主项目目录 `{project}` 中执行 `git add -A` 和 `git status --short`，确认变更已同步
+   e. 如果遇到文件已存在等冲突，分析原因并解决后重试
+6. 回复中必须包含 **变更摘要**（格式："创建了 X，修改了 Y"）。
+7. 所有说明使用简体中文。"#,
+        worktree = worktree_path.display(),
+        project = project_path.display(),
+        title = node.title,
+        kind = node.kind,
+        instructions = node.instructions,
+        criteria = node
+            .acceptance_criteria
             .iter()
             .map(|item| format!("- {item}"))
             .collect::<Vec<_>>()
             .join("\n"),
-        if node.target_files.is_empty() {
+        targets = if node.target_files.is_empty() {
             "- 未限定，按节点说明判断".to_string()
         } else {
             node.target_files
@@ -376,11 +462,71 @@ fn build_worker_prompt(node: &DagNode) -> String {
     )
 }
 
+/// 将 project_path 中所有文件（排除 .git）同步到 worktree
+async fn sync_project_to_worktree(project_path: &Path, worktree_path: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(project_path)
+        .output()
+        .await
+        .context("获取 project 状态失败")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for line in stdout.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let status = &line[..2];
+        let file_path = line[3..].trim();
+
+        // 只同步变更的文件（修改 M、新增 A、未跟踪 ??），跳过删除 D
+        if status.starts_with('D') {
+            continue;
+        }
+        if !status.starts_with('M') && !status.starts_with('A') && !status.starts_with('?') {
+            continue;
+        }
+
+        let src = project_path.join(file_path);
+        let dst = worktree_path.join(file_path);
+
+        if src.is_dir() {
+            // 目录：递归复制
+            copy_dir_recursive(&src, &dst).await?;
+        } else if src.is_file() {
+            if let Some(parent) = dst.parent() {
+                tokio::fs::create_dir_all(parent).await.ok();
+            }
+            tokio::fs::copy(&src, &dst).await.ok();
+        }
+    }
+
+    Ok(())
+}
+
+async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    tokio::fs::create_dir_all(dst).await.ok();
+    let mut entries = tokio::fs::read_dir(src).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        if name == ".git" {
+            continue;
+        }
+        let src_child = src.join(&name);
+        let dst_child = dst.join(&name);
+        if entry.file_type().await?.is_dir() {
+            Box::pin(copy_dir_recursive(&src_child, &dst_child)).await?;
+        } else {
+            tokio::fs::copy(&src_child, &dst_child).await.ok();
+        }
+    }
+    Ok(())
+}
+
 async fn create_worktree(project_path: &Path, worktree_path: &Path) -> Result<()> {
-    // 如果 worktree 已存在，先移除旧的（避免残留文件导致 diff 冲突）
+    // 如果 worktree 已存在，先移除旧的
     if worktree_path.exists() {
         let _ = tokio::fs::remove_dir_all(worktree_path).await;
-        // 清理 git 的 worktree 记录
         let _ = Command::new("git")
             .args(["worktree", "prune"])
             .current_dir(project_path)
@@ -402,7 +548,7 @@ async fn create_worktree(project_path: &Path, worktree_path: &Path) -> Result<()
         .arg("worktree")
         .arg("add")
         .arg("-B")
-        .arg(branch)
+        .arg(&branch)
         .arg(worktree_path)
         .current_dir(project_path)
         .output()
@@ -414,6 +560,11 @@ async fn create_worktree(project_path: &Path, worktree_path: &Path) -> Result<()
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
+
+    // 同步 project_path 中所有变更（未跟踪/修改）到 worktree
+    // 这样后续节点能看到之前节点的变更
+    sync_project_to_worktree(project_path, worktree_path).await?;
+
     Ok(())
 }
 
